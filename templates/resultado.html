@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card full">
+  <h2>Resultado del procesamiento</h2>
+  <p class="small">Procesado: {{ meta.created_at }} · Hoja de curva usada: <b>{{ meta.summary.curve_sheet }}</b></p>
+  <div class="kpis">
+    <div class="kpi"><span>IDs planificados</span><strong>{{ meta.summary.planned_ids }}</strong></div>
+    <div class="kpi"><span>IDs reportados</span><strong>{{ meta.summary.reported_ids }}</strong></div>
+    <div class="kpi"><span>IDs con match</span><strong>{{ meta.summary.matched_ids }}</strong></div>
+    <div class="kpi"><span>Empresas sin reporte</span><strong>{{ meta.summary.missing_companies }}</strong></div>
+  </div>
+  <div class="actions">
+    <a class="btn success" href="{{ url_for('descargar', job=meta.job) }}">Descargar Excel final</a>
+    <a class="btn" href="{{ url_for('index') }}">Nuevo procesamiento</a>
+  </div>
+</section>
+<section class="grid">
+  <div class="card full">
+    <h2>Empresas con dotación planificada sin reportabilidad detectada</h2>
+    {% if meta.missing_companies %}
+    <div class="tablewrap"><table><thead><tr><th>Empresa</th><th>IDs planificados</th><th>Dotación planificada</th></tr></thead><tbody>
+      {% for row in meta.missing_companies %}<tr><td>{{ row.EMPRESA }}</td><td>{{ row.ids_planificados }}</td><td>{{ row.dotacion_planificada }}</td></tr>{% endfor %}
+    </tbody></table></div>
+    {% else %}<div class="notice ok">No se detectaron empresas sin reportabilidad, según los archivos cargados.</div>{% endif %}
+  </div>
+  <div class="card full">
+    <h2>IDs planificados no reportados</h2>
+    {% if meta.missing_ids %}
+    <div class="tablewrap"><table><thead><tr><th>ID</th><th>Empresa</th><th>Contrato</th><th>Dotación planificada</th></tr></thead><tbody>
+      {% for row in meta.missing_ids %}<tr><td>{{ row.ID }}</td><td>{{ row.EMPRESA }}</td><td>{{ row['NUMERO DE CONTRATO'] }}</td><td>{{ row.DOTACION_PLANIFICADA }}</td></tr>{% endfor %}
+    </tbody></table></div>
+    {% else %}<div class="notice ok">Todos los IDs planificados fueron encontrados en la reportabilidad cargada.</div>{% endif %}
+  </div>
+  <div class="card full">
+    <h2>Vista previa del formato final</h2>
+    {% if meta.preview %}
+    <div class="tablewrap"><table><thead><tr>{% for col in target_columns %}<th>{{ col }}</th>{% endfor %}</tr></thead><tbody>
+      {% for row in meta.preview %}<tr>{% for col in target_columns %}<td>{{ row[col] }}</td>{% endfor %}</tr>{% endfor %}
+    </tbody></table></div>
+    {% else %}<div class="notice error">No se generaron filas transformadas desde la reportabilidad.</div>{% endif %}
+  </div>
+</section>
+{% endblock %}

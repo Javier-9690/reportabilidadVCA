@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Reportabilidad VCA 5400{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div>
+        <h1>Reportabilidad VCA 5400</h1>
+        <p>Curva de poblamiento · Dotación por empresa · Cruce por ID · Exportación Excel normalizada</p>
+      </div>
+      <div class="badge">Diseñado para Render.com</div>
+    </div>
+  </header>
+  <main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="notice {{ 'error' if category == 'error' else 'ok' }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+    <div class="footer">Diseñado por Javier Rivera · Campamento 5400</div>
+  </main>
+</body>
+</html>
