@@ -46,12 +46,19 @@ Luego abre `http://127.0.0.1:5000`.
 1. Sube esta carpeta a un repositorio GitHub.
 2. En Render, crea un **Web Service**.
 3. Conecta el repositorio.
-4. Usa estos comandos:
-   - Build Command: `pip install -r requirements.txt`
+4. Verifica que los archivos estén en la raíz del repositorio: `app.py`, `requirements.txt`, `.python-version`, `render.yaml`, `templates/` y `static/`.
+5. Usa estos comandos:
+   - Build Command: `pip install --upgrade pip && pip install -r requirements.txt`
    - Start Command: `gunicorn app:app`
-5. Variable recomendada:
-   - `SECRET_KEY`: una clave aleatoria.
+6. Configura la variable de entorno `PYTHON_VERSION=3.11.11` si Render no toma automáticamente el archivo `.python-version`.
 
 ## Nota operativa
 
 Render usa almacenamiento efímero en su plan estándar. Los archivos generados quedan disponibles para descarga inmediatamente después del procesamiento, pero no debe asumirse conservación permanente.
+
+
+## Corrección de despliegue en Render
+
+Este paquete incluye `.python-version` con `3.11.11` y `render.yaml` con `PYTHON_VERSION=3.11.11`. Esto evita que Render use Python 3.14 por defecto y compile pandas desde fuente.
+
+Si el despliegue anterior falló con `metadata-generation-failed` en pandas, vuelve a subir este paquete, asegúrate de que `.python-version` esté en la raíz del repositorio y ejecuta un nuevo deploy manual.
