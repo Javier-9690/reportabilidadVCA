@@ -4,13 +4,32 @@
   <div>
     <div class="eyebrow">Reporte operativo</div>
     <h2>Importar curva y reportabilidad</h2>
-    <p>El sistema cruza la curva de poblamiento contra la dotación enviada por empresa y genera el Excel final normalizado.</p>
+    <p>El sistema cruza la curva de poblamiento contra la dotación enviada por empresa, guarda el proceso en PostgreSQL y genera el Excel final normalizado.</p>
+  </div>
+  <div class="actions compact">
+    <a class="btn secondary" href="{{ url_for('historial') }}">Ver historial</a>
   </div>
 </section>
 
 <section class="card full">
-  <h2>Procesar archivos</h2>
+  <h2>Estado de almacenamiento</h2>
+  {% if db_status.enabled and db_status.initialized %}
+    <div class="notice ok">PostgreSQL conectado. Las reportabilidades procesadas quedarán guardadas en la base de datos.</div>
+  {% elif db_status.enabled %}
+    <div class="notice error">DATABASE_URL está configurada, pero la app todavía no pudo inicializar PostgreSQL. Revisa los logs o entra a /healthz.</div>
+  {% else %}
+    <div class="notice error">No hay DATABASE_URL configurada. La app procesará archivos, pero no guardará historial persistente.</div>
+  {% endif %}
+</section>
+
+<section class="card full">
+  <h2>Procesar y guardar nueva reportabilidad</h2>
   <form action="{{ url_for('procesar') }}" method="post" enctype="multipart/form-data">
+    <div class="uploadbox">
+      <label>Nombre o referencia de la carga</label>
+      <input type="text" name="descripcion" placeholder="Ej: Semana 26 - reporte contratistas VCA">
+      <small>Este texto queda guardado en el historial para identificar la semana o actualización.</small>
+    </div>
     <div class="uploadbox">
       <label>Curva de poblamiento (.xlsx / .xlsm)</label>
       <input type="file" name="curva" accept=".xlsx,.xlsm" required>
@@ -22,41 +41,19 @@
       <small>Permite una o varias empresas. ID esperado: <b>N° DE ID</b>.</small>
     </div>
     <div class="actions right">
-      <button class="btn primary" type="submit">Generar reporte</button>
+      <button class="btn primary" type="submit">Procesar y guardar</button>
     </div>
   </form>
 </section>
 
 <section class="grid">
   <div class="card">
-    <h2>Control de reportabilidad</h2>
-    <p>Identifica las empresas que tienen dotación planificada en la curva, pero que no aparecen dentro de los archivos cargados como reportabilidad.</p>
+    <h2>Actualización semanal</h2>
+    <p>Cada carga queda registrada como un proceso independiente. Puedes guardar Semana 26, Semana 27, Semana 28, etc., y eliminar cargas antiguas cuando ya no correspondan.</p>
   </div>
   <div class="card">
-    <h2>Exportación Excel</h2>
-    <p>El archivo final mantiene el formato requerido con ID, módulo, RUT, nombre completo, empresa, contrato, gerencia, turno, CO MEL, género y nombre de turno.</p>
-  </div>
-</section>
-
-<section class="card full">
-  <h2>Columnas del Excel final</h2>
-  <div class="tablewrap">
-    <table>
-      <thead><tr><th>Orden</th><th>Columna</th><th>Origen detectado</th></tr></thead>
-      <tbody>
-        <tr><td>1</td><td>ID</td><td>N° DE ID / ID de la solicitud</td></tr>
-        <tr><td>2</td><td>MODULO</td><td>Módulo, habitación o cama a utilizar</td></tr>
-        <tr><td>3</td><td>RUT (CON GUION)</td><td>RUT normalizado con guion</td></tr>
-        <tr><td>4</td><td>NOMBRE COMPLETO</td><td>Nombre huésped / nombre completo</td></tr>
-        <tr><td>5</td><td>EMPRESA</td><td>Empresa reportada o empresa de curva</td></tr>
-        <tr><td>6</td><td>NUMERO DE CONTRATO</td><td>N° de contrato / número contrato</td></tr>
-        <tr><td>7</td><td>GERENCIA</td><td>Gerencia</td></tr>
-        <tr><td>8</td><td>SISTEMA DE TURNO</td><td>Sistema de turno</td></tr>
-        <tr><td>9</td><td>CO MEL</td><td>Contract Owner MEL</td></tr>
-        <tr><td>10</td><td>GENERO</td><td>Sexo / género</td></tr>
-        <tr><td>11</td><td>NOMBRE DE TURNO</td><td>Nombre de turno</td></tr>
-      </tbody>
-    </table>
+    <h2>Exportación recuperable</h2>
+    <p>El Excel se puede volver a descargar desde el historial porque los datos transformados, faltantes y empresas sin reportabilidad quedan guardados en PostgreSQL.</p>
   </div>
 </section>
 {% endblock %}

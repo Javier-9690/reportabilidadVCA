@@ -4,11 +4,17 @@
   <div>
     <div class="eyebrow">Resultado del procesamiento</div>
     <h2>Reporte generado correctamente</h2>
-    <p>Hoja de curva: <b>{{ meta.summary.curve_sheet }}</b> · Alcance: <b>{{ meta.summary.plan_scope }}</b> · Procesado: {{ meta.created_at }}</p>
+    <p>
+      Hoja de curva: <b>{{ meta.summary.curve_sheet }}</b> · Alcance: <b>{{ meta.summary.plan_scope }}</b> · Procesado: {{ meta.created_at }}
+      {% if meta.descripcion %} · Ref.: <b>{{ meta.descripcion }}</b>{% endif %}
+    </p>
   </div>
   <div class="actions compact">
     <a class="btn success" href="{{ url_for('descargar', job=meta.job) }}">Exportar Excel</a>
-    <a class="btn secondary" href="{{ url_for('index') }}">Nuevo procesamiento</a>
+    <a class="btn secondary" href="{{ url_for('historial') }}">Historial</a>
+    <form action="{{ url_for('eliminar', job=meta.job) }}" method="post" onsubmit="return confirm('¿Eliminar esta reportabilidad guardada? Esta acción no se puede deshacer.');">
+      <button class="btn danger" type="submit">Eliminar</button>
+    </form>
   </div>
 </section>
 
@@ -19,6 +25,20 @@
   <div class="kpi"><span>IDs faltantes</span><strong>{{ meta.summary.missing_ids }}</strong></div>
   <div class="kpi"><span>Empresas sin reporte</span><strong>{{ meta.summary.missing_companies }}</strong></div>
   <div class="kpi"><span>Filas transformadas</span><strong>{{ meta.summary.transformed_rows }}</strong></div>
+</section>
+
+<section class="card full">
+  <h2>Archivos procesados</h2>
+  <p><b>Curva:</b> {{ meta.curve_filename or meta.summary.curve_filename or '-' }}</p>
+  <p><b>Reportabilidades:</b>
+    {% if meta.report_filenames %}
+      {{ meta.report_filenames|join(', ') }}
+    {% elif meta.summary.report_filenames %}
+      {{ meta.summary.report_filenames|join(', ') }}
+    {% else %}
+      -
+    {% endif %}
+  </p>
 </section>
 
 <section class="grid">

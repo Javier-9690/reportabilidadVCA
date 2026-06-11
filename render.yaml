@@ -2,7 +2,6 @@ services:
   - type: web
     name: reportabilidad-vca-5400
     env: python
-    plan: free
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: gunicorn --workers 1 --threads 2 --timeout 240 app:app
     envVars:
@@ -10,3 +9,5 @@ services:
         value: 3.11.11
       - key: SECRET_KEY
         generateValue: true
+      - key: DATABASE_URL
+        sync: false

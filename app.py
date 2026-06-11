@@ -1,17 +1,24 @@
 import json
 import os
 import re
+import ssl
 import unicodedata
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 from datetime import date, datetime
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 from xml.sax.saxutils import escape
 
 from flask import Flask, flash, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
+
+try:
+    import pg8000.dbapi as pgdb
+except Exception:  # Permite ejecutar la app localmente sin PostgreSQL instalado.
+    pgdb = None
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -635,14 +642,443 @@ def write_output(path: Path, transformed: List[Dict[str, Any]], missing_ids: Lis
             z.writestr(f"xl/worksheets/sheet{idx}.xml", sheet_xml(rows, columns, name))
 
 
+# -----------------------------
+# Persistencia en PostgreSQL
+# -----------------------------
+DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or os.environ.get("POSTGRESQL_URL")
+_DB_INITIALIZED = False
+_DB_LAST_ERROR: Optional[str] = None
+
+
+def db_enabled() -> bool:
+    return bool(DATABASE_URL and pgdb is not None)
+
+
+def db_status() -> Dict[str, Any]:
+    return {
+        "enabled": bool(DATABASE_URL),
+        "driver_loaded": pgdb is not None,
+        "initialized": _DB_INITIALIZED,
+        "last_error": _DB_LAST_ERROR,
+    }
+
+
+def get_db_connection():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL no está configurada. Conecta la PostgreSQL de Render al servicio web.")
+    if pgdb is None:
+        raise RuntimeError("No está instalado el driver pg8000. Revisa requirements.txt.")
+
+    parsed = urlparse(DATABASE_URL)
+    query = parse_qs(parsed.query)
+    sslmode = (query.get("sslmode", [os.environ.get("PGSSLMODE", "")])[0] or "").lower()
+    db_ssl = (os.environ.get("DB_SSL", "") or "").lower()
+    use_ssl = sslmode in {"require", "verify-ca", "verify-full"} or db_ssl in {"1", "true", "yes", "require"}
+
+    ssl_context = None
+    if use_ssl:
+        ssl_context = ssl.create_default_context()
+        if sslmode == "require":
+            # Render suele entregar cadenas con sslmode=require. En ese modo se cifra la conexión
+            # sin exigir validación estricta de hostname/certificado.
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+    return pgdb.connect(
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+        database=(parsed.path or "/").lstrip("/"),
+        user=unquote(parsed.username or ""),
+        password=unquote(parsed.password or ""),
+        ssl_context=ssl_context,
+        timeout=int(os.environ.get("DB_TIMEOUT", "20")),
+    )
+
+
+def execute_db(sql: str, params: Optional[Sequence[Any]] = None, fetch: bool = False) -> Optional[List[Tuple[Any, ...]]]:
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, params or ())
+        rows = cur.fetchall() if fetch else None
+        conn.commit()
+        cur.close()
+        return rows
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db() -> bool:
+    global _DB_INITIALIZED, _DB_LAST_ERROR
+    if _DB_INITIALIZED:
+        return True
+    if not DATABASE_URL:
+        _DB_LAST_ERROR = "DATABASE_URL no configurada"
+        return False
+    if pgdb is None:
+        _DB_LAST_ERROR = "pg8000 no instalado"
+        return False
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reportabilidad_procesos (
+                job_id TEXT PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                descripcion TEXT,
+                curve_filename TEXT NOT NULL,
+                report_filenames TEXT NOT NULL,
+                curve_sheet TEXT,
+                plan_scope TEXT,
+                summary_json TEXT NOT NULL
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reportabilidad_formato (
+                id BIGSERIAL PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES reportabilidad_procesos(job_id) ON DELETE CASCADE,
+                fila INTEGER NOT NULL,
+                id_solicitud TEXT,
+                modulo TEXT,
+                rut TEXT,
+                nombre_completo TEXT,
+                empresa TEXT,
+                numero_contrato TEXT,
+                gerencia TEXT,
+                sistema_turno TEXT,
+                co_mel TEXT,
+                genero TEXT,
+                nombre_turno TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reportabilidad_missing_ids (
+                id BIGSERIAL PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES reportabilidad_procesos(job_id) ON DELETE CASCADE,
+                id_solicitud TEXT,
+                empresa TEXT,
+                numero_contrato TEXT,
+                dotacion_planificada TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reportabilidad_missing_empresas (
+                id BIGSERIAL PRIMARY KEY,
+                job_id TEXT NOT NULL REFERENCES reportabilidad_procesos(job_id) ON DELETE CASCADE,
+                empresa TEXT,
+                ids_planificados INTEGER,
+                dotacion_planificada TEXT
+            );
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reportabilidad_procesos_created ON reportabilidad_procesos(created_at DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reportabilidad_formato_job ON reportabilidad_formato(job_id, fila);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reportabilidad_missing_ids_job ON reportabilidad_missing_ids(job_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reportabilidad_missing_empresas_job ON reportabilidad_missing_empresas(job_id);")
+        conn.commit()
+        cur.close()
+        conn.close()
+        _DB_INITIALIZED = True
+        _DB_LAST_ERROR = None
+        return True
+    except Exception as exc:
+        _DB_LAST_ERROR = str(exc)
+        app.logger.exception("No se pudo inicializar PostgreSQL")
+        return False
+
+
+@app.before_request
+def before_request_init_db():
+    if DATABASE_URL and not _DB_INITIALIZED:
+        init_db()
+
+
+def summary_for_storage(summary: Dict[str, Any]) -> str:
+    return json.dumps(summary, ensure_ascii=False)
+
+
+def parse_summary(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    try:
+        return json.loads(value or "{}")
+    except Exception:
+        return {}
+
+
+def save_processing_to_db(
+    job: str,
+    descripcion: str,
+    curve_filename: str,
+    report_filenames: Sequence[str],
+    transformed: List[Dict[str, Any]],
+    missing_ids: List[Dict[str, Any]],
+    missing_companies: List[Dict[str, Any]],
+    summary: Dict[str, Any],
+) -> bool:
+    if not init_db():
+        return False
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO reportabilidad_procesos
+            (job_id, descripcion, curve_filename, report_filenames, curve_sheet, plan_scope, summary_json)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                job,
+                descripcion,
+                curve_filename,
+                json.dumps(list(report_filenames), ensure_ascii=False),
+                summary.get("curve_sheet", ""),
+                summary.get("plan_scope", ""),
+                summary_for_storage(summary),
+            ),
+        )
+        for fila, row in enumerate(transformed, start=1):
+            cur.execute(
+                """
+                INSERT INTO reportabilidad_formato
+                (job_id, fila, id_solicitud, modulo, rut, nombre_completo, empresa, numero_contrato, gerencia, sistema_turno, co_mel, genero, nombre_turno)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    job,
+                    fila,
+                    row.get("ID", ""),
+                    row.get("MODULO", ""),
+                    row.get("RUT (CON GUION)", ""),
+                    row.get("NOMBRE COMPLETO", ""),
+                    row.get("EMPRESA", ""),
+                    row.get("NUMERO DE CONTRATO", ""),
+                    row.get("GERENCIA", ""),
+                    row.get("SISTEMA DE TURNO", ""),
+                    row.get("CO MEL", ""),
+                    row.get("GENERO", ""),
+                    row.get("NOMBRE DE TURNO", ""),
+                ),
+            )
+        for row in missing_ids:
+            cur.execute(
+                """
+                INSERT INTO reportabilidad_missing_ids
+                (job_id, id_solicitud, empresa, numero_contrato, dotacion_planificada)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    job,
+                    row.get("ID", ""),
+                    row.get("EMPRESA", ""),
+                    row.get("NUMERO DE CONTRATO", ""),
+                    clean_text(row.get("DOTACION_PLANIFICADA", "")),
+                ),
+            )
+        for row in missing_companies:
+            cur.execute(
+                """
+                INSERT INTO reportabilidad_missing_empresas
+                (job_id, empresa, ids_planificados, dotacion_planificada)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    job,
+                    row.get("EMPRESA", ""),
+                    int(row.get("ids_planificados") or 0),
+                    clean_text(row.get("dotacion_planificada", "")),
+                ),
+            )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def rows_to_output(rows: Sequence[Tuple[Any, ...]]) -> List[Dict[str, Any]]:
+    result = []
+    for row in rows:
+        result.append(
+            {
+                "ID": row[0] or "",
+                "MODULO": row[1] or "",
+                "RUT (CON GUION)": row[2] or "",
+                "NOMBRE COMPLETO": row[3] or "",
+                "EMPRESA": row[4] or "",
+                "NUMERO DE CONTRATO": row[5] or "",
+                "GERENCIA": row[6] or "",
+                "SISTEMA DE TURNO": row[7] or "",
+                "CO MEL": row[8] or "",
+                "GENERO": row[9] or "",
+                "NOMBRE DE TURNO": row[10] or "",
+            }
+        )
+    return result
+
+
+def load_processing_from_db(job: str, preview_only: bool = False) -> Optional[Dict[str, Any]]:
+    if not init_db():
+        return None
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT job_id, created_at, descripcion, curve_filename, report_filenames, summary_json
+            FROM reportabilidad_procesos
+            WHERE job_id = %s
+            """,
+            (job,),
+        )
+        proc = cur.fetchone()
+        if not proc:
+            cur.close()
+            return None
+        limit_sql = "LIMIT 20" if preview_only else ""
+        cur.execute(
+            f"""
+            SELECT id_solicitud, modulo, rut, nombre_completo, empresa, numero_contrato, gerencia, sistema_turno, co_mel, genero, nombre_turno
+            FROM reportabilidad_formato
+            WHERE job_id = %s
+            ORDER BY fila
+            {limit_sql}
+            """,
+            (job,),
+        )
+        transformed = rows_to_output(cur.fetchall())
+        cur.execute(
+            """
+            SELECT id_solicitud, empresa, numero_contrato, dotacion_planificada
+            FROM reportabilidad_missing_ids
+            WHERE job_id = %s
+            ORDER BY empresa, id_solicitud
+            """,
+            (job,),
+        )
+        missing_ids = [
+            {"ID": r[0] or "", "EMPRESA": r[1] or "", "NUMERO DE CONTRATO": r[2] or "", "DOTACION_PLANIFICADA": r[3] or ""}
+            for r in cur.fetchall()
+        ]
+        cur.execute(
+            """
+            SELECT empresa, ids_planificados, dotacion_planificada
+            FROM reportabilidad_missing_empresas
+            WHERE job_id = %s
+            ORDER BY empresa
+            """,
+            (job,),
+        )
+        missing_companies = [
+            {"EMPRESA": r[0] or "", "ids_planificados": r[1] or 0, "dotacion_planificada": r[2] or ""}
+            for r in cur.fetchall()
+        ]
+        cur.close()
+        summary = parse_summary(proc[5])
+        return {
+            "job": proc[0],
+            "created_at": proc[1].strftime("%Y-%m-%d %H:%M:%S") if hasattr(proc[1], "strftime") else clean_text(proc[1]),
+            "descripcion": proc[2] or "",
+            "curve_filename": proc[3] or "",
+            "report_filenames": parse_summary(proc[4]) if proc[4] else [],
+            "summary": summary,
+            "preview": transformed[:20],
+            "transformed_all": transformed,
+            "missing_ids": missing_ids[:80] if preview_only else missing_ids,
+            "missing_companies": missing_companies[:80] if preview_only else missing_companies,
+            "source": "db",
+        }
+    finally:
+        conn.close()
+
+
+def list_processings_from_db() -> List[Dict[str, Any]]:
+    if not init_db():
+        return []
+    rows = execute_db(
+        """
+        SELECT job_id, created_at, descripcion, curve_filename, report_filenames, summary_json
+        FROM reportabilidad_procesos
+        ORDER BY created_at DESC
+        LIMIT 200
+        """,
+        fetch=True,
+    ) or []
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        summary = parse_summary(row[5])
+        result.append(
+            {
+                "job": row[0],
+                "created_at": row[1].strftime("%Y-%m-%d %H:%M:%S") if hasattr(row[1], "strftime") else clean_text(row[1]),
+                "descripcion": row[2] or "",
+                "curve_filename": row[3] or "",
+                "report_filenames": parse_summary(row[4]) if row[4] else [],
+                "summary": summary,
+            }
+        )
+    return result
+
+
+def delete_processing_from_db(job: str) -> bool:
+    if not init_db():
+        return False
+    execute_db("DELETE FROM reportabilidad_procesos WHERE job_id = %s", (job,))
+    return True
+
+
+def load_meta_fallback(job: str) -> Optional[Dict[str, Any]]:
+    meta_path = OUTPUT_DIR / f"{job}.json"
+    if not meta_path.exists():
+        return None
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["source"] = "local"
+    return meta
+
+
+def remove_local_artifacts(job: str) -> None:
+    for path in OUTPUT_DIR.glob(f"*{job}*"):
+        try:
+            path.unlink()
+        except Exception:
+            pass
+    meta_path = OUTPUT_DIR / f"{job}.json"
+    if meta_path.exists():
+        try:
+            meta_path.unlink()
+        except Exception:
+            pass
+
+
 @app.route("/", methods=["GET"])
 def index():
-    return render_template("index.html")
+    return render_template("index.html", db_status=db_status())
 
 
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    return {"status": "ok"}
+    return {"status": "ok", "db": db_status()}
+
+
+@app.route("/historial", methods=["GET"])
+def historial():
+    procesos = list_processings_from_db() if DATABASE_URL else []
+    return render_template("historial.html", procesos=procesos, db_status=db_status())
 
 
 @app.route("/procesar", methods=["POST"])
@@ -650,6 +1086,7 @@ def procesar():
     try:
         curva = request.files.get("curva")
         reports = request.files.getlist("reportabilidad")
+        descripcion = clean_text(request.form.get("descripcion", ""))
         if not curva or not curva.filename:
             flash("Debes subir la curva de poblamiento.", "error")
             return redirect(url_for("index"))
@@ -659,6 +1096,8 @@ def procesar():
             return redirect(url_for("index"))
 
         job = uuid.uuid4().hex[:10]
+        curve_original_name = secure_filename(curva.filename) or curva.filename
+        report_original_names = [secure_filename(f.filename) or f.filename for f in reports]
         curve_path = safe_filename("curva", curva.filename, job)
         curva.save(curve_path)
 
@@ -669,8 +1108,26 @@ def procesar():
             report_paths.append(path)
 
         transformed, missing_ids, missing_companies, summary = process_files(curve_path, report_paths)
+        summary["descripcion"] = descripcion
+        summary["curve_filename"] = curve_original_name
+        summary["report_filenames"] = report_original_names
+        summary["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         output_path = OUTPUT_DIR / f"reportabilidad_vca_{job}.xlsx"
         write_output(output_path, transformed, missing_ids, missing_companies, summary)
+
+        saved_db = False
+        if DATABASE_URL:
+            saved_db = save_processing_to_db(
+                job=job,
+                descripcion=descripcion,
+                curve_filename=curve_original_name,
+                report_filenames=report_original_names,
+                transformed=transformed,
+                missing_ids=missing_ids,
+                missing_companies=missing_companies,
+                summary=summary,
+            )
 
         meta = {
             "job": job,
@@ -679,10 +1136,21 @@ def procesar():
             "preview": transformed[:20],
             "missing_ids": missing_ids[:80],
             "missing_companies": missing_companies[:80],
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at": summary["created_at"],
+            "descripcion": descripcion,
+            "curve_filename": curve_original_name,
+            "report_filenames": report_original_names,
+            "source": "db" if saved_db else "local",
         }
         with open(OUTPUT_DIR / f"{job}.json", "w", encoding="utf-8") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=2)
+
+        if saved_db:
+            flash("Reportabilidad procesada y guardada en PostgreSQL.", "ok")
+        elif DATABASE_URL:
+            flash("Se procesó el archivo, pero no se pudo confirmar guardado en PostgreSQL. Revisa /healthz o los logs.", "error")
+        else:
+            flash("Se procesó el archivo. No hay DATABASE_URL configurada, por lo tanto no quedó guardado en PostgreSQL.", "error")
         return redirect(url_for("resultado", job=job))
     except Exception as exc:
         app.logger.exception("Error al procesar archivos")
@@ -692,25 +1160,55 @@ def procesar():
 
 @app.route("/resultado/<job>")
 def resultado(job: str):
-    meta_path = OUTPUT_DIR / f"{job}.json"
-    if not meta_path.exists():
+    meta = load_processing_from_db(job, preview_only=True) if DATABASE_URL else None
+    if not meta:
+        meta = load_meta_fallback(job)
+    if not meta:
         flash("No se encontró el procesamiento solicitado.", "error")
         return redirect(url_for("index"))
-    with open(meta_path, encoding="utf-8") as fh:
-        meta = json.load(fh)
     return render_template("resultado.html", meta=meta, target_columns=TARGET_COLUMNS)
 
 
 @app.route("/descargar/<job>")
 def descargar(job: str):
-    meta_path = OUTPUT_DIR / f"{job}.json"
-    if not meta_path.exists():
+    db_meta = load_processing_from_db(job, preview_only=False) if DATABASE_URL else None
+    if db_meta:
+        output_path = OUTPUT_DIR / f"reportabilidad_vca_{job}_db.xlsx"
+        write_output(
+            output_path,
+            db_meta["transformed_all"],
+            db_meta["missing_ids"],
+            db_meta["missing_companies"],
+            db_meta["summary"],
+        )
+        return send_file(output_path, as_attachment=True, download_name="Reportabilidad_VCA_Formato_Final.xlsx")
+
+    meta = load_meta_fallback(job)
+    if not meta:
         flash("No se encontró el archivo de salida.", "error")
         return redirect(url_for("index"))
-    with open(meta_path, encoding="utf-8") as fh:
-        meta = json.load(fh)
     path = OUTPUT_DIR / meta["output"]
+    if not path.exists():
+        flash("El archivo local ya no está disponible. Si usas Render, guarda en PostgreSQL para regenerarlo.", "error")
+        return redirect(url_for("resultado", job=job))
     return send_file(path, as_attachment=True, download_name="Reportabilidad_VCA_Formato_Final.xlsx")
+
+
+@app.route("/eliminar/<job>", methods=["POST"])
+def eliminar(job: str):
+    try:
+        deleted = False
+        if DATABASE_URL:
+            deleted = delete_processing_from_db(job)
+        remove_local_artifacts(job)
+        if deleted:
+            flash("Reportabilidad eliminada correctamente de PostgreSQL.", "ok")
+        else:
+            flash("Se eliminaron los archivos locales asociados. No se confirmó eliminación en PostgreSQL.", "ok")
+    except Exception as exc:
+        app.logger.exception("Error al eliminar reportabilidad")
+        flash(f"Error al eliminar reportabilidad: {exc}", "error")
+    return redirect(url_for("historial"))
 
 
 if __name__ == "__main__":

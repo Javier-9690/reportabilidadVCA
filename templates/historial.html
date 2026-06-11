@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-card">
+  <div>
+    <div class="eyebrow">Historial PostgreSQL</div>
+    <h2>Reportabilidades guardadas</h2>
+    <p>Desde aquí puedes revisar, descargar o eliminar procesos guardados en la base de datos.</p>
+  </div>
+  <div class="actions compact">
+    <a class="btn secondary" href="{{ url_for('index') }}">Nueva carga</a>
+  </div>
+</section>
+
+{% if not db_status.enabled %}
+  <div class="notice error">No hay DATABASE_URL configurada. Conecta la base de datos PostgreSQL de Render al servicio web.</div>
+{% elif not db_status.initialized %}
+  <div class="notice error">PostgreSQL no se pudo inicializar. Último error: {{ db_status.last_error }}</div>
+{% endif %}
+
+<section class="card full">
+  <h2>Procesos guardados</h2>
+  {% if procesos %}
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Fecha</th>
+            <th>Referencia</th>
+            <th>Curva</th>
+            <th>Reportabilidades</th>
+            <th>Alcance</th>
+            <th>IDs curva</th>
+            <th>IDs reportados</th>
+            <th>Empresas sin reporte</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in procesos %}
+          <tr>
+            <td>{{ p.created_at }}</td>
+            <td>{{ p.descripcion or '-' }}</td>
+            <td>{{ p.curve_filename }}</td>
+            <td>{{ p.report_filenames|length }}</td>
+            <td>{{ p.summary.plan_scope }}</td>
+            <td>{{ p.summary.planned_ids }}</td>
+            <td>{{ p.summary.reported_ids }}</td>
+            <td>{{ p.summary.missing_companies }}</td>
+            <td class="row-actions">
+              <a class="btn tiny secondary" href="{{ url_for('resultado', job=p.job) }}">Ver</a>
+              <a class="btn tiny success" href="{{ url_for('descargar', job=p.job) }}">Excel</a>
+              <form action="{{ url_for('eliminar', job=p.job) }}" method="post" onsubmit="return confirm('¿Eliminar esta reportabilidad guardada? Esta acción no se puede deshacer.');">
+                <button class="btn tiny danger" type="submit">Eliminar</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="notice ok">Aún no hay reportabilidades guardadas en PostgreSQL.</div>
+  {% endif %}
+</section>
+{% endblock %}
