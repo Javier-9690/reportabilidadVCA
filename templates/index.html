@@ -1,52 +1,71 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="grid">
-  <div class="card">
-    <h2>1. Cargar curva de poblamiento</h2>
-    <p>El sistema leerá automáticamente la hoja <b>Fcst_Autorizado VCA</b> y tomará los registros con dotación planificada mayor a cero.</p>
-    <div class="notice">La comparación principal se realiza contra el campo <b>ID de la solicitud</b>.</div>
+<section class="hero-card">
+  <div>
+    <div class="eyebrow">⌘ Reporte operativo</div>
+    <h1>Reporte alojamiento F&amp;A</h1>
+    <p>Fast &amp; Agile / F&amp;A: cruce entre curva de poblamiento y reportabilidad de dotación por empresa.</p>
   </div>
-  <div class="card">
-    <h2>2. Cargar reportabilidad de empresa</h2>
-    <p>Sube una o varias planillas de dotación. El sistema reconocerá el ID de reportabilidad y generará un Excel final con el formato estándar solicitado.</p>
-    <div class="notice">Campo esperado en dotación: <b>N° DE ID</b>. También reconoce nombres equivalentes.</div>
+  <div class="hero-actions">
+    <a class="btn green" href="#procesar">↥ Importar archivos</a>
   </div>
-  <div class="card full">
-    <h2>Procesar archivos</h2>
-    <form action="{{ url_for('procesar') }}" method="post" enctype="multipart/form-data">
-      <div class="uploadbox">
-        <label>Curva de poblamiento (.xlsx)</label>
-        <input type="file" name="curva" accept=".xlsx,.xls" required>
-      </div>
-      <div class="uploadbox">
-        <label>Reportabilidad / dotación de empresa (.xlsx) — permite múltiples archivos</label>
-        <input type="file" name="reportabilidad" accept=".xlsx,.xls" multiple required>
-      </div>
-      <div class="actions">
-        <button class="btn secondary" type="submit">Procesar reportabilidad</button>
-      </div>
-    </form>
-  </div>
-  <div class="card full">
-    <h2>Columnas del Excel final</h2>
-    <div class="tablewrap">
-      <table>
-        <thead><tr><th>Orden</th><th>Columna</th><th>Origen detectado</th></tr></thead>
-        <tbody>
-          <tr><td>1</td><td>ID</td><td>N° DE ID / ID de la solicitud</td></tr>
-          <tr><td>2</td><td>MODULO</td><td>Módulo, Habitación o Cama a utilizar</td></tr>
-          <tr><td>3</td><td>RUT (CON GUION)</td><td>RUT normalizado con guion</td></tr>
-          <tr><td>4</td><td>NOMBRE COMPLETO</td><td>Nombre Huésped / Nombre Completo</td></tr>
-          <tr><td>5</td><td>EMPRESA</td><td>Empresa</td></tr>
-          <tr><td>6</td><td>NUMERO DE CONTRATO</td><td>N° de contrato / Número Contrato</td></tr>
-          <tr><td>7</td><td>GERENCIA</td><td>Gerencia</td></tr>
-          <tr><td>8</td><td>SISTEMA DE TURNO</td><td>Sistema de Turno</td></tr>
-          <tr><td>9</td><td>CO MEL</td><td>Nombre Contract Owner / Correo CO</td></tr>
-          <tr><td>10</td><td>GENERO</td><td>Sexo / Género</td></tr>
-          <tr><td>11</td><td>NOMBRE DE TURNO</td><td>Nombre Turno</td></tr>
-        </tbody>
-      </table>
+</section>
+
+<section class="filter-card" id="procesar">
+  <form action="{{ url_for('procesar') }}" method="post" enctype="multipart/form-data" class="upload-form">
+    <div class="field two-thirds">
+      <label>Curva</label>
+      <input type="file" name="curva" accept=".xlsx,.xlsm,.xls" required>
+      <small>Hoja esperada: <b>Fcst_Autorizado VCA</b>. ID base: <b>ID de la solicitud</b>.</small>
     </div>
+    <div class="field two-thirds">
+      <label>Dotación / reportabilidad</label>
+      <input type="file" name="reportabilidad" accept=".xlsx,.xlsm,.xls" multiple required>
+      <small>Permite una o varias empresas. ID esperado: <b>N° DE ID</b>.</small>
+    </div>
+    <div class="field action-field">
+      <label>&nbsp;</label>
+      <button class="btn red fullwidth" type="submit">↻ Generar</button>
+    </div>
+  </form>
+</section>
+
+<section class="metric-grid">
+  <div class="metric-card"><span>↬ Proceso</span><strong>Curva</strong><small>Fcst_Autorizado VCA</small></div>
+  <div class="metric-card"><span>▣ Cruce</span><strong>ID</strong><small>ID solicitud / N° de ID</small></div>
+  <div class="metric-card"><span>☑ Salida</span><strong>Excel</strong><small>Formato final estándar</small></div>
+  <div class="metric-card"><span>⚠ Control</span><strong>Sin reporte</strong><small>Empresas planificadas no enviadas</small></div>
+</section>
+
+<section class="content-card conclusion-card">
+  <h2>💡 Conclusiones del procesamiento</h2>
+  <ul>
+    <li>El sistema toma la curva de poblamiento y detecta los IDs con dotación planificada.</li>
+    <li>Luego compara esos IDs contra las planillas de reportabilidad cargadas por empresa.</li>
+    <li>Finalmente entrega el listado de empresas que tienen dotación planificada en curva, pero no aparecen en la reportabilidad.</li>
+  </ul>
+</section>
+
+<section class="content-card">
+  <div class="section-title">▤ Formato Excel final</div>
+  <p class="subtitle">Columnas normalizadas que genera el sistema.</p>
+  <div class="tablewrap compact-table">
+    <table>
+      <thead><tr><th>Orden</th><th>Columna</th><th>Origen detectado</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>ID</td><td>N° DE ID / ID de la solicitud</td></tr>
+        <tr><td>2</td><td>MODULO</td><td>Módulo, habitación o cama a utilizar</td></tr>
+        <tr><td>3</td><td>RUT (CON GUION)</td><td>RUT normalizado con guion</td></tr>
+        <tr><td>4</td><td>NOMBRE COMPLETO</td><td>Nombre huésped / nombre completo</td></tr>
+        <tr><td>5</td><td>EMPRESA</td><td>Empresa reportada o empresa de curva</td></tr>
+        <tr><td>6</td><td>NUMERO DE CONTRATO</td><td>N° de contrato / Número Contrato</td></tr>
+        <tr><td>7</td><td>GERENCIA</td><td>Gerencia</td></tr>
+        <tr><td>8</td><td>SISTEMA DE TURNO</td><td>Sistema de turno</td></tr>
+        <tr><td>9</td><td>CO MEL</td><td>Contract Owner MEL</td></tr>
+        <tr><td>10</td><td>GENERO</td><td>Sexo / género</td></tr>
+        <tr><td>11</td><td>NOMBRE DE TURNO</td><td>Nombre de turno</td></tr>
+      </tbody>
+    </table>
   </div>
 </section>
 {% endblock %}
