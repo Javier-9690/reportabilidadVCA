@@ -1,63 +1,66 @@
 # Reportabilidad VCA 5400
 
-Aplicación Flask para Render.com que cruza la curva de poblamiento con la reportabilidad/dotación de empresas.
+Aplicación Flask para Render.com que cruza una curva de poblamiento con archivos de reportabilidad/dotación por empresa.
 
-## Funciones
+## Qué hace
 
-- Carga curva de poblamiento Excel.
-- Lee automáticamente la hoja `Fcst_Autorizado VCA`.
-- Detecta la semana de planificación desde el archivo o encabezado (`Semana 26`, `W26`, etc.).
-- Carga una o varias planillas de reportabilidad/dotación.
-- Cruza por ID:
-  - Curva: `ID de la solicitud`.
-  - Reportabilidad: `N° DE ID` o equivalente.
-- Informa empresas con dotación planificada que no enviaron reportabilidad.
-- Exporta Excel final con:
-  - `Formato_Final`
-  - `Empresas_Sin_Reportabilidad`
-  - `IDs_Planificados_No_Reportados`
-  - `Resumen`
+- Carga la curva de poblamiento.
+- Toma automáticamente la hoja `Fcst_Autorizado VCA`.
+- Carga una o varias reportabilidades de empresas.
+- Reconoce el ID de la curva como `ID de la solicitud`.
+- Reconoce el ID de reportabilidad como `N° DE ID` o equivalente.
+- Indica empresas que tienen dotación planificada en curva pero no enviaron reportabilidad.
+- Exporta un Excel con formato final y hojas de control.
 
-## Excel final
+## Salida Excel
 
-Columnas generadas en `Formato_Final`:
+La hoja `Formato_Final` contiene:
 
-1. ID
-2. MODULO
-3. RUT (CON GUION)
-4. NOMBRE COMPLETO
-5. EMPRESA
-6. NUMERO DE CONTRATO
-7. GERENCIA
-8. SISTEMA DE TURNO
-9. CO MEL
-10. GENERO
-11. NOMBRE DE TURNO
+- ID
+- MODULO
+- RUT (CON GUION)
+- NOMBRE COMPLETO
+- EMPRESA
+- NUMERO DE CONTRATO
+- GERENCIA
+- SISTEMA DE TURNO
+- CO MEL
+- GENERO
+- NOMBRE DE TURNO
 
-## Render.com
+Además incluye:
 
-### Environment Variable obligatoria
+- `Empresas_Sin_Reportabilidad`
+- `IDs_Planificados_No_Reportados`
+- `Resumen`
 
-Agrega en Render:
+## Versión optimizada
+
+Esta versión no usa pandas, numpy ni openpyxl para leer los archivos de entrada. Lee directamente el XML interno de los XLSX/XLSM para evitar timeouts en Render con curvas pesadas o con muchos estilos.
+
+## Render
+
+Build Command:
+
+```bash
+pip install --upgrade pip && pip install -r requirements.txt
+```
+
+Start Command:
+
+```bash
+gunicorn --workers 1 --threads 2 --timeout 240 app:app
+```
+
+Environment Variable recomendada:
 
 ```text
 PYTHON_VERSION=3.11.11
 ```
 
-### Build Command
+## Archivos aceptados
 
-```bash
-pip install --upgrade pip && pip install --only-binary=:all: -r requirements.txt
-```
+- `.xlsx`
+- `.xlsm`
 
-### Start Command
-
-```bash
-gunicorn --workers 1 --threads 2 --timeout 180 app:app
-```
-
-## Nota técnica
-
-Esta versión no usa `pandas` ni `numpy`. El procesamiento se realiza con `openpyxl` para evitar problemas de compilación y consumo de memoria en Render.
-
-Si Render sigue mostrando rutas con `python3.14` en el log, significa que el servicio no tomó la variable `PYTHON_VERSION` o está desplegando otra raíz de proyecto.
+Si tienes un archivo `.xls`, guárdalo desde Excel como `.xlsx` antes de subirlo.

@@ -3,8 +3,8 @@ services:
     name: reportabilidad-vca-5400
     env: python
     plan: free
-    buildCommand: pip install --upgrade pip && pip install --only-binary=:all: -r requirements.txt
-    startCommand: gunicorn --workers 1 --threads 2 --timeout 180 app:app
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 2 --timeout 240 app:app
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.11
