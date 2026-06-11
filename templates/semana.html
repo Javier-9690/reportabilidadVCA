@@ -22,6 +22,7 @@
   <div class="kpi"><span>IDs reportados</span><strong>{{ meta.summary.reported_ids }}</strong></div>
   <div class="kpi"><span>IDs con match</span><strong>{{ meta.summary.matched_ids }}</strong></div>
   <div class="kpi"><span>IDs faltantes</span><strong>{{ meta.summary.missing_ids }}</strong></div>
+  <div class="kpi"><span>IDs sin match</span><strong>{{ meta.summary.unmatched_reported_ids }}</strong></div>
   <div class="kpi"><span>Empresas sin reporte</span><strong>{{ meta.summary.missing_companies }}</strong></div>
   <div class="kpi"><span>Archivos cargados</span><strong>{{ meta.summary.report_files }}</strong></div>
 </section>
@@ -97,16 +98,27 @@
   <div class="card full">
     <h2>Empresas con dotación planificada sin reportabilidad detectada</h2>
     {% if meta.missing_companies %}
-    <div class="tablewrap"><table><thead><tr><th>Empresa</th><th>IDs planificados</th><th>Dotación planificada</th></tr></thead><tbody>
-      {% for row in meta.missing_companies %}<tr><td>{{ row.EMPRESA }}</td><td>{{ row.ids_planificados }}</td><td>{{ row.dotacion_planificada }}</td></tr>{% endfor %}
+    <div class="tablewrap"><table><thead><tr><th>Empresa</th><th>SPA/ CO</th><th>IDs planificados</th><th>Dotación planificada</th></tr></thead><tbody>
+      {% for row in meta.missing_companies %}<tr><td>{{ row.EMPRESA }}</td><td>{{ row['SPA/ CO'] }}</td><td>{{ row.ids_planificados }}</td><td>{{ row.dotacion_planificada }}</td></tr>{% endfor %}
     </tbody></table></div>
     {% else %}<div class="notice ok">No se detectaron empresas sin reportabilidad, según las cargas actuales.</div>{% endif %}
   </div>
   <div class="card full">
+    <h2>IDs reportados sin match y propuestas de reparación</h2>
+    <p class="small">Estos son IDs que llegaron en una reportabilidad, pero no existen en la curva guardada de la semana. El sistema propone candidatos similares para que los valides antes de corregir el archivo original y recargarlo.</p>
+    {% if meta.id_repairs %}
+    <div class="notice error">Hay {{ meta.summary.unmatched_reported_ids }} ID(s) reportado(s) sin match. Revisa las sugerencias antes de contactar a la empresa o reemplazar el archivo.</div>
+    <div class="tablewrap"><table><thead><tr>{% for col in repair_columns %}<th>{{ col }}</th>{% endfor %}</tr></thead><tbody>
+      {% for row in meta.id_repairs %}<tr>{% for col in repair_columns %}<td>{{ row[col] }}</td>{% endfor %}</tr>{% endfor %}
+    </tbody></table></div>
+    {% else %}<div class="notice ok">No hay IDs reportados fuera de la curva. Todos los IDs cargados existen en la planificación.</div>{% endif %}
+  </div>
+
+  <div class="card full">
     <h2>IDs planificados no reportados</h2>
     {% if meta.missing_ids %}
-    <div class="tablewrap"><table><thead><tr><th>ID</th><th>Empresa</th><th>Contrato</th><th>Dotación planificada</th></tr></thead><tbody>
-      {% for row in meta.missing_ids %}<tr><td>{{ row.ID }}</td><td>{{ row.EMPRESA }}</td><td>{{ row['NUMERO DE CONTRATO'] }}</td><td>{{ row.DOTACION_PLANIFICADA }}</td></tr>{% endfor %}
+    <div class="tablewrap"><table><thead><tr><th>ID</th><th>Empresa</th><th>Contrato</th><th>SPA/ CO</th><th>Dotación planificada</th></tr></thead><tbody>
+      {% for row in meta.missing_ids %}<tr><td>{{ row.ID }}</td><td>{{ row.EMPRESA }}</td><td>{{ row['NUMERO DE CONTRATO'] }}</td><td>{{ row['SPA/ CO'] }}</td><td>{{ row.DOTACION_PLANIFICADA }}</td></tr>{% endfor %}
     </tbody></table></div>
     {% else %}<div class="notice ok">Todos los IDs planificados fueron encontrados en las reportabilidades cargadas.</div>{% endif %}
   </div>

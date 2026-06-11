@@ -7,6 +7,7 @@ import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 from datetime import date, datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -47,6 +48,33 @@ TARGET_COLUMNS = [
     "CO MEL",
     "GENERO",
     "NOMBRE DE TURNO",
+]
+
+REPAIR_COLUMNS = [
+    "ID REPORTADO",
+    "FILAS_AFECTADAS",
+    "EMPRESA REPORTADA",
+    "NOMBRE COMPLETO",
+    "ARCHIVO",
+    "ID SUGERIDO 1",
+    "CONFIANZA 1",
+    "MOTIVO 1",
+    "EMPRESA CURVA 1",
+    "CONTRATO CURVA 1",
+    "SPA/ CO 1",
+    "ID SUGERIDO 2",
+    "CONFIANZA 2",
+    "MOTIVO 2",
+    "EMPRESA CURVA 2",
+    "CONTRATO CURVA 2",
+    "SPA/ CO 2",
+    "ID SUGERIDO 3",
+    "CONFIANZA 3",
+    "MOTIVO 3",
+    "EMPRESA CURVA 3",
+    "CONTRATO CURVA 3",
+    "SPA/ CO 3",
+    "ACCION PROPUESTA",
 ]
 
 SYNONYMS = {
@@ -103,6 +131,173 @@ def normalize_id(value: Any) -> str:
     text = text.replace("–", "-").replace("—", "-")
     text = re.sub(r"\s+", "", text)
     return text
+
+
+def id_repair_key(value: Any) -> str:
+    """Normaliza caracteres que suelen confundirse en IDs escritos manualmente."""
+    text = normalize_id(value)
+    return text.translate(str.maketrans({"O": "0", "I": "1", "L": "1", "S": "5", "B": "8", "Z": "2"}))
+
+
+def split_id_parts(value: Any) -> Tuple[str, str]:
+    text = normalize_id(value)
+    match = re.match(r"^([A-Z]+)(.*)$", text)
+    if not match:
+        return "", text
+    return match.group(1), match.group(2)
+
+
+def is_single_transposition(a: str, b: str) -> bool:
+    if len(a) != len(b) or a == b:
+        return False
+    diffs = [i for i, (ca, cb) in enumerate(zip(a, b)) if ca != cb]
+    return len(diffs) == 2 and diffs[1] == diffs[0] + 1 and a[diffs[0]] == b[diffs[1]] and a[diffs[1]] == b[diffs[0]]
+
+
+def id_similarity_score(report_id: str, planned_id: str) -> Tuple[int, str]:
+    """Calcula similitud entre un ID reportado y uno planificado, con explicación legible."""
+    a = normalize_id(report_id)
+    b = normalize_id(planned_id)
+    if not a or not b:
+        return 0, "ID vacío"
+    if a == b:
+        return 100, "match exacto"
+
+    ak = id_repair_key(a)
+    bk = id_repair_key(b)
+    base = SequenceMatcher(None, a, b).ratio() * 100
+    key_score = SequenceMatcher(None, ak, bk).ratio() * 100
+    score = max(base, key_score)
+    reasons: List[str] = []
+
+    prefix_a, rest_a = split_id_parts(a)
+    prefix_b, rest_b = split_id_parts(b)
+    key_prefix_a, key_rest_a = split_id_parts(ak)
+    key_prefix_b, key_rest_b = split_id_parts(bk)
+
+    if prefix_a and prefix_a == prefix_b:
+        score += 10
+        reasons.append("mismo prefijo")
+    elif prefix_a[:2] and prefix_a[:2] == prefix_b[:2]:
+        score += 5
+        reasons.append("prefijo similar")
+    else:
+        score -= 12
+        reasons.append("prefijo distinto")
+
+    if len(rest_a) == len(rest_b) and rest_a:
+        diffs = sum(1 for ca, cb in zip(rest_a, rest_b) if ca != cb)
+        if diffs == 1:
+            score += 12
+            reasons.append("1 caracter distinto")
+        elif diffs == 2 and is_single_transposition(rest_a, rest_b):
+            score += 12
+            reasons.append("posible transposición")
+        elif diffs <= 2:
+            score += 6
+            reasons.append(f"{diffs} caracteres distintos")
+    elif abs(len(a) - len(b)) == 1:
+        score += 4
+        reasons.append("posible caracter faltante/sobrante")
+    else:
+        score -= min(abs(len(a) - len(b)) * 4, 18)
+
+    if ak == bk and a != b:
+        score = max(score, 96)
+        reasons.append("posible confusión O/0, I/1, S/5 u otro")
+    elif key_prefix_a == key_prefix_b and key_rest_a and key_rest_b and len(key_rest_a) == len(key_rest_b):
+        key_diffs = sum(1 for ca, cb in zip(key_rest_a, key_rest_b) if ca != cb)
+        if key_diffs == 1:
+            score += 5
+            reasons.append("muy cercano tras normalizar caracteres")
+
+    score = int(round(max(0, min(99, score))))
+    reason = "; ".join(dict.fromkeys(reasons)) or "similitud textual"
+    return score, reason
+
+
+def confidence_label(score: int) -> str:
+    if score >= 92:
+        return f"Alta ({score}%)"
+    if score >= 82:
+        return f"Media ({score}%)"
+    if score >= 70:
+        return f"Baja ({score}%)"
+    return f"Revisar ({score}%)"
+
+
+def build_id_repair_suggestions(
+    transformed_rows: List[Dict[str, Any]],
+    plan_rows: List[Dict[str, Any]],
+    reported_ids: set[str],
+) -> List[Dict[str, Any]]:
+    """Detecta IDs reportados que no existen en la curva y propone candidatos planificados.
+
+    No corrige automáticamente: entrega sugerencias para validar contra empresa, contrato y SPA/CO.
+    """
+    planned_ids = {normalize_id(r.get("ID")) for r in plan_rows if normalize_id(r.get("ID"))}
+    unmatched_ids = sorted([rid for rid in reported_ids if rid and rid not in planned_ids])
+    if not unmatched_ids:
+        return []
+
+    plan_by_id = {normalize_id(r.get("ID")): r for r in plan_rows if normalize_id(r.get("ID"))}
+    candidate_ids = sorted(planned_ids)
+    rows_by_bad_id: Dict[str, List[Dict[str, Any]]] = {}
+    for row in transformed_rows:
+        rid = normalize_id(row.get("ID"))
+        if rid in unmatched_ids:
+            rows_by_bad_id.setdefault(rid, []).append(row)
+
+    suggestions: List[Dict[str, Any]] = []
+    for bad_id in unmatched_ids:
+        rows = rows_by_bad_id.get(bad_id, [])
+        first = rows[0] if rows else {}
+        reported_company_norm = normalize_company(first.get("EMPRESA", ""))
+        prefix_bad, _ = split_id_parts(bad_id)
+        same_prefix = [cid for cid in candidate_ids if split_id_parts(cid)[0] == prefix_bad]
+        similar_prefix = [cid for cid in candidate_ids if prefix_bad and split_id_parts(cid)[0][:2] == prefix_bad[:2]]
+        same_company = [cid for cid in candidate_ids if reported_company_norm and plan_by_id.get(cid, {}).get("EMPRESA_NORM") == reported_company_norm]
+        same_company_same_prefix = [cid for cid in same_company if split_id_parts(cid)[0] == prefix_bad]
+        pool = same_company_same_prefix or same_company or same_prefix or similar_prefix or candidate_ids
+        scored: List[Tuple[int, str, str]] = []
+        for cid in pool:
+            score, reason = id_similarity_score(bad_id, cid)
+            plan = plan_by_id.get(cid, {})
+            if reported_company_norm and plan.get("EMPRESA_NORM") == reported_company_norm:
+                score = min(99, score + 10)
+                reason = f"{reason}; misma empresa"
+            reason = f"{reason}; {'ID sugerido ya reportado' if cid in reported_ids else 'ID sugerido aún no reportado'}"
+            if score >= 62:
+                scored.append((score, reason, cid))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        top = scored[:3]
+        item: Dict[str, Any] = {
+            "ID REPORTADO": bad_id,
+            "FILAS_AFECTADAS": len(rows) or 1,
+            "EMPRESA REPORTADA": first.get("EMPRESA", ""),
+            "NOMBRE COMPLETO": first.get("NOMBRE COMPLETO", ""),
+            "ARCHIVO": first.get("ARCHIVO", ""),
+            "ACCION PROPUESTA": "Sin candidato confiable. Revisar manualmente contra curva y reportabilidad.",
+        }
+        for idx in range(1, 4):
+            item[f"ID SUGERIDO {idx}"] = ""
+            item[f"CONFIANZA {idx}"] = ""
+            item[f"MOTIVO {idx}"] = ""
+            item[f"EMPRESA CURVA {idx}"] = ""
+            item[f"CONTRATO CURVA {idx}"] = ""
+            item[f"SPA/ CO {idx}"] = ""
+        for idx, (score, reason, cid) in enumerate(top, start=1):
+            plan = plan_by_id.get(cid, {})
+            item[f"ID SUGERIDO {idx}"] = cid
+            item[f"CONFIANZA {idx}"] = confidence_label(score)
+            item[f"MOTIVO {idx}"] = reason
+            item[f"EMPRESA CURVA {idx}"] = plan.get("EMPRESA", "")
+            item[f"CONTRATO CURVA {idx}"] = plan.get("NUMERO DE CONTRATO", "")
+            item[f"SPA/ CO {idx}"] = export_contact_value(plan)
+        if top:
+            item["ACCION PROPUESTA"] = f"Validar si {bad_id} corresponde a {top[0][2]}. Si corresponde, corregir el ID en la reportabilidad original y recargar el archivo."
+        suggestions.append(item)
+    return suggestions
 
 
 def normalize_company(value: Any) -> str:
@@ -528,6 +723,8 @@ def process_files(curve_path: Path, report_paths: Sequence[Path]) -> Tuple[List[
             )
     missing_companies.sort(key=lambda r: normalize_company(r["EMPRESA"]))
 
+    id_repairs = build_id_repair_suggestions(transformed, planned_rows, reported_ids)
+
     summary = {
         "curve_sheet": curve_sheet,
         "plan_scope": plan_scope,
@@ -535,6 +732,8 @@ def process_files(curve_path: Path, report_paths: Sequence[Path]) -> Tuple[List[
         "reported_ids": len(reported_ids),
         "matched_ids": len(planned_ids.intersection(reported_ids)),
         "missing_ids": len(planned_ids - reported_ids),
+        "unmatched_reported_ids": len(reported_ids - planned_ids),
+        "repair_suggestions": len(id_repairs),
         "planned_companies": len(company_bucket),
         "reported_companies": len(reported_companies),
         "missing_companies": len(missing_companies),
@@ -645,7 +844,7 @@ def export_contact_value(row: Dict[str, Any]) -> str:
     )
 
 
-def write_output(path: Path, transformed: List[Dict[str, Any]], missing_ids: List[Dict[str, Any]], missing_companies: List[Dict[str, Any]], summary: Dict[str, Any]) -> None:
+def write_output(path: Path, transformed: List[Dict[str, Any]], missing_ids: List[Dict[str, Any]], missing_companies: List[Dict[str, Any]], summary: Dict[str, Any], id_repairs: Optional[List[Dict[str, Any]]] = None) -> None:
     missing_ids_export = []
     for row in missing_ids:
         enriched = dict(row)
@@ -660,6 +859,7 @@ def write_output(path: Path, transformed: List[Dict[str, Any]], missing_ids: Lis
 
     sheets = [
         ("Formato_Final", transformed, TARGET_COLUMNS),
+        ("IDs_Reportados_Sin_Match", id_repairs or [], REPAIR_COLUMNS),
         ("Empresas_Sin_Reportabilidad", missing_companies_export, ["EMPRESA", "SPA/ CO", "ids_planificados", "dotacion_planificada"]),
         ("IDs_Planificados_No_Reportados", missing_ids_export, ["ID", "EMPRESA", "NUMERO DE CONTRATO", "SPA/ CO", "DOTACION_PLANIFICADA"]),
         ("Resumen", [summary], list(summary.keys())),
@@ -1195,7 +1395,7 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
         ]
         cur.execute(
             """
-            SELECT f.id, f.id_solicitud, f.modulo, f.rut, f.nombre_completo, f.empresa, f.numero_contrato,
+            SELECT f.id, f.archivo_id, a.filename, f.id_solicitud, f.modulo, f.rut, f.nombre_completo, f.empresa, f.numero_contrato,
                    f.gerencia, f.sistema_turno, f.co_mel, f.genero, f.nombre_turno, a.created_at
             FROM reportabilidad_formato_v2 f
             JOIN reportabilidad_archivos a ON a.archivo_id = f.archivo_id
@@ -1214,22 +1414,24 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
     transformed_all: List[Dict[str, Any]] = []
     reported_ids: set[str] = set()
     for r in report_rows_raw:
-        row_id = normalize_id(r[1])
+        row_id = normalize_id(r[3])
         if not row_id:
             continue
         reported_ids.add(row_id)
         transformed_all.append({
+            "ARCHIVO_ID": r[1] or "",
+            "ARCHIVO": r[2] or "",
             "ID": row_id,
-            "MODULO": r[2] or "",
-            "RUT (CON GUION)": r[3] or "",
-            "NOMBRE COMPLETO": r[4] or "",
-            "EMPRESA": r[5] or "",
-            "NUMERO DE CONTRATO": r[6] or "",
-            "GERENCIA": r[7] or "",
-            "SISTEMA DE TURNO": r[8] or "",
-            "CO MEL": r[9] or "",
-            "GENERO": r[10] or "",
-            "NOMBRE DE TURNO": r[11] or "",
+            "MODULO": r[4] or "",
+            "RUT (CON GUION)": r[5] or "",
+            "NOMBRE COMPLETO": r[6] or "",
+            "EMPRESA": r[7] or "",
+            "NUMERO DE CONTRATO": r[8] or "",
+            "GERENCIA": r[9] or "",
+            "SISTEMA DE TURNO": r[10] or "",
+            "CO MEL": r[11] or "",
+            "GENERO": r[12] or "",
+            "NOMBRE DE TURNO": r[13] or "",
         })
 
     planned_ids = {r["ID"] for r in plan_rows if r.get("ID")}
@@ -1291,6 +1493,8 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
             )
     missing_companies.sort(key=lambda r: normalize_company(r["EMPRESA"]))
 
+    id_repairs = build_id_repair_suggestions(transformed_all, plan_rows, reported_ids)
+
     summary = {
         "curve_sheet": base["curve_sheet"],
         "plan_scope": base["plan_scope"],
@@ -1298,6 +1502,8 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
         "reported_ids": len(reported_ids),
         "matched_ids": len(planned_ids.intersection(reported_ids)),
         "missing_ids": len(planned_ids - reported_ids),
+        "unmatched_reported_ids": len(reported_ids - planned_ids),
+        "repair_suggestions": len(id_repairs),
         "planned_companies": len(company_bucket),
         "reported_companies": len(reported_companies),
         "missing_companies": len(missing_companies),
@@ -1317,6 +1523,7 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
         "transformed_all": transformed_all,
         "missing_ids": missing_ids_out[:80] if preview_only else missing_ids_out,
         "missing_companies": missing_companies[:80] if preview_only else missing_companies,
+        "id_repairs": id_repairs[:80] if preview_only else id_repairs,
     }
 
 
@@ -1433,7 +1640,7 @@ def ver_semana(semana_id: str):
     if not meta:
         flash("No se encontró la semana solicitada.", "error")
         return redirect(url_for("historial"))
-    return render_template("semana.html", meta=meta, target_columns=TARGET_COLUMNS)
+    return render_template("semana.html", meta=meta, target_columns=TARGET_COLUMNS, repair_columns=REPAIR_COLUMNS)
 
 
 @app.route("/semana/<semana_id>/agregar", methods=["POST"])
@@ -1508,7 +1715,7 @@ def descargar(semana_id: str):
     output_path = OUTPUT_DIR / f"reportabilidad_vca_{semana_id}.xlsx"
     summary = dict(meta["summary"])
     summary["archivos_reportabilidad"] = ", ".join([a["filename"] for a in meta.get("archivos", [])])
-    write_output(output_path, meta["transformed_all"], meta["missing_ids"], meta["missing_companies"], summary)
+    write_output(output_path, meta["transformed_all"], meta["missing_ids"], meta["missing_companies"], summary, meta.get("id_repairs", []))
     return send_file(output_path, as_attachment=True, download_name=f"Reportabilidad_VCA_{meta['nombre_semana']}.xlsx")
 
 

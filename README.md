@@ -83,3 +83,9 @@ La hoja `IDs_Planificados_No_Reportados` exporta el contacto de la curva con el 
 La hoja `Empresas_Sin_Reportabilidad` también muestra `SPA/ CO` consolidado por empresa para facilitar el contacto con el responsable.
 
 Si una semana fue creada antes de esta mejora y la columna aparece vacía, se debe entrar a la semana y usar `Actualizar curva` cargando nuevamente la curva correspondiente. Esto repuebla la planificación guardada en PostgreSQL con el contacto SPA/CO.
+
+## Reparación sugerida de IDs
+
+La versión actual detecta IDs reportados que no existen en la curva semanal guardada. Para cada ID sin match, el sistema calcula similitud contra IDs planificados no reportados y propone hasta tres candidatos de reparación.
+
+La reparación no se aplica automáticamente. La hoja `IDs_Reportados_Sin_Match` y la vista de semana muestran el ID reportado, archivo de origen, empresa reportada, nombre, ID sugerido, confianza, motivo, empresa/contrato de curva y SPA/ CO para validar antes de corregir el archivo original y recargarlo.
