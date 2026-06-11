@@ -17,10 +17,13 @@ CREATE TABLE IF NOT EXISTS reportabilidad_planificacion (
     empresa TEXT,
     empresa_norm TEXT,
     numero_contrato TEXT,
+    co_mel TEXT,
     dotacion_planificada NUMERIC,
     dotacion_dias_sumada NUMERIC,
     UNIQUE (semana_id, id_solicitud)
 );
+
+ALTER TABLE reportabilidad_planificacion ADD COLUMN IF NOT EXISTS co_mel TEXT;
 
 CREATE TABLE IF NOT EXISTS reportabilidad_archivos (
     archivo_id TEXT PRIMARY KEY,

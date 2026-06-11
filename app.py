@@ -439,6 +439,7 @@ def process_files(curve_path: Path, report_paths: Sequence[Path]) -> Tuple[List[
     curve_id_col = pick_column_from_headers(curve_headers, CURVE_ID_COLS)
     curve_company_col = pick_column_from_headers(curve_headers, CURVE_COMPANY_COLS)
     curve_contract_col = pick_column_from_headers(curve_headers, CURVE_CONTRACT_COLS)
+    curve_co_mel_col = pick_column_from_headers(curve_headers, SYNONYMS["CO MEL"])
     if not curve_id_col or not curve_company_col:
         raise ValueError("No se pudo detectar ID de la solicitud y Empresa en la hoja Fcst_Autorizado VCA.")
 
@@ -458,6 +459,7 @@ def process_files(curve_path: Path, report_paths: Sequence[Path]) -> Tuple[List[
                     "EMPRESA": company,
                     "EMPRESA_NORM": normalize_company(company),
                     "NUMERO DE CONTRATO": clean_text(record.get(curve_contract_col)) if curve_contract_col else "",
+                    "CO MEL": clean_text(record.get(curve_co_mel_col)) if curve_co_mel_col else "",
                     "DOTACION_PLANIFICADA": int(planned_max) if planned_max.is_integer() else planned_max,
                     "DOTACION_DIAS_SUMADA": sum_planned_days(record, plan_keys),
                 }
@@ -629,7 +631,7 @@ def write_output(path: Path, transformed: List[Dict[str, Any]], missing_ids: Lis
     sheets = [
         ("Formato_Final", transformed, TARGET_COLUMNS),
         ("Empresas_Sin_Reportabilidad", missing_companies, ["EMPRESA", "ids_planificados", "dotacion_planificada"]),
-        ("IDs_Planificados_No_Reportados", missing_ids, ["ID", "EMPRESA", "NUMERO DE CONTRATO", "DOTACION_PLANIFICADA"]),
+        ("IDs_Planificados_No_Reportados", missing_ids, ["ID", "EMPRESA", "NUMERO DE CONTRATO", "CO MEL", "DOTACION_PLANIFICADA"]),
         ("Resumen", [summary], list(summary.keys())),
     ]
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as z:
@@ -747,12 +749,14 @@ def init_db() -> bool:
                 empresa TEXT,
                 empresa_norm TEXT,
                 numero_contrato TEXT,
+                co_mel TEXT,
                 dotacion_planificada NUMERIC,
                 dotacion_dias_sumada NUMERIC,
                 UNIQUE (semana_id, id_solicitud)
             );
             """
         )
+        cur.execute("ALTER TABLE reportabilidad_planificacion ADD COLUMN IF NOT EXISTS co_mel TEXT;")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS reportabilidad_archivos (
@@ -839,6 +843,7 @@ def parse_curve_planning(curve_path: Path) -> Tuple[List[Dict[str, Any]], Dict[s
     curve_id_col = pick_column_from_headers(curve_headers, CURVE_ID_COLS)
     curve_company_col = pick_column_from_headers(curve_headers, CURVE_COMPANY_COLS)
     curve_contract_col = pick_column_from_headers(curve_headers, CURVE_CONTRACT_COLS)
+    curve_co_mel_col = pick_column_from_headers(curve_headers, SYNONYMS["CO MEL"])
     if not curve_id_col or not curve_company_col:
         raise ValueError("No se pudo detectar ID de la solicitud y Empresa en la hoja Fcst_Autorizado VCA.")
 
@@ -860,6 +865,7 @@ def parse_curve_planning(curve_path: Path) -> Tuple[List[Dict[str, Any]], Dict[s
             "EMPRESA": company,
             "EMPRESA_NORM": normalize_company(company),
             "NUMERO DE CONTRATO": clean_text(record.get(curve_contract_col)) if curve_contract_col else "",
+            "CO MEL": clean_text(record.get(curve_co_mel_col)) if curve_co_mel_col else "",
             "DOTACION_PLANIFICADA": int(planned_max) if float(planned_max).is_integer() else planned_max,
             "DOTACION_DIAS_SUMADA": sum_planned_days(record, plan_keys),
         }
@@ -966,13 +972,14 @@ def insert_planning_rows(cur, semana_id: str, planned_rows: List[Dict[str, Any]]
         cur.execute(
             """
             INSERT INTO reportabilidad_planificacion
-            (semana_id, id_solicitud, empresa, empresa_norm, numero_contrato, dotacion_planificada, dotacion_dias_sumada)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (semana_id, id_solicitud, empresa, empresa_norm, numero_contrato, co_mel, dotacion_planificada, dotacion_dias_sumada)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (semana_id, id_solicitud)
             DO UPDATE SET
                 empresa = EXCLUDED.empresa,
                 empresa_norm = EXCLUDED.empresa_norm,
                 numero_contrato = EXCLUDED.numero_contrato,
+                co_mel = EXCLUDED.co_mel,
                 dotacion_planificada = EXCLUDED.dotacion_planificada,
                 dotacion_dias_sumada = EXCLUDED.dotacion_dias_sumada
             """,
@@ -982,6 +989,7 @@ def insert_planning_rows(cur, semana_id: str, planned_rows: List[Dict[str, Any]]
                 row.get("EMPRESA", ""),
                 row.get("EMPRESA_NORM", ""),
                 row.get("NUMERO DE CONTRATO", ""),
+                row.get("CO MEL", ""),
                 row.get("DOTACION_PLANIFICADA", 0),
                 row.get("DOTACION_DIAS_SUMADA", 0),
             ),
@@ -1116,7 +1124,7 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id_solicitud, empresa, empresa_norm, numero_contrato, dotacion_planificada, dotacion_dias_sumada
+            SELECT id_solicitud, empresa, empresa_norm, numero_contrato, co_mel, dotacion_planificada, dotacion_dias_sumada
             FROM reportabilidad_planificacion
             WHERE semana_id = %s
             ORDER BY empresa, id_solicitud
@@ -1129,8 +1137,9 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
                 "EMPRESA": r[1] or "",
                 "EMPRESA_NORM": r[2] or "",
                 "NUMERO DE CONTRATO": r[3] or "",
-                "DOTACION_PLANIFICADA": r[4] or 0,
-                "DOTACION_DIAS_SUMADA": r[5] or 0,
+                "CO MEL": r[4] or "",
+                "DOTACION_PLANIFICADA": r[5] or 0,
+                "DOTACION_DIAS_SUMADA": r[6] or 0,
             }
             for r in cur.fetchall()
         ]
@@ -1170,13 +1179,16 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
     finally:
         conn.close()
 
-    # Deduplicación por ID: si se carga el mismo ID otra vez, se conserva la última carga.
-    dedup: Dict[str, Dict[str, Any]] = {}
+    # Exportación completa: se conservan TODAS las personas/filas cargadas.
+    # El ID se usa solo para calcular cobertura contra la curva, no para eliminar filas del formato final.
+    transformed_all: List[Dict[str, Any]] = []
+    reported_ids: set[str] = set()
     for r in report_rows_raw:
         row_id = normalize_id(r[1])
         if not row_id:
             continue
-        dedup[row_id] = {
+        reported_ids.add(row_id)
+        transformed_all.append({
             "ID": row_id,
             "MODULO": r[2] or "",
             "RUT (CON GUION)": r[3] or "",
@@ -1188,11 +1200,9 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
             "CO MEL": r[9] or "",
             "GENERO": r[10] or "",
             "NOMBRE DE TURNO": r[11] or "",
-        }
-    transformed_all = list(dedup.values())
+        })
 
     planned_ids = {r["ID"] for r in plan_rows if r.get("ID")}
-    reported_ids = set(dedup.keys())
     plan_by_id = {r["ID"]: r for r in plan_rows if r.get("ID")}
 
     reported_companies: set[str] = set()
@@ -1215,6 +1225,7 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
             "ID": r.get("ID", ""),
             "EMPRESA": r.get("EMPRESA", ""),
             "NUMERO DE CONTRATO": r.get("NUMERO DE CONTRATO", ""),
+            "CO MEL": r.get("CO MEL", ""),
             "DOTACION_PLANIFICADA": clean_text(r.get("DOTACION_PLANIFICADA", "")),
         }
         for r in missing_ids

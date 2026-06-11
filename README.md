@@ -69,3 +69,8 @@ La unidad principal ya no es una carga aislada, sino una `semana`:
 4. Cada archivo cargado queda individualizado.
 5. Puedes eliminar un archivo puntual si una empresa envió una versión errónea.
 6. El Excel se genera siempre desde el estado actual de la semana.
+
+## Corrección de exportación
+
+- La hoja `Formato_Final` conserva todas las filas/personas cargadas desde las reportabilidades. El ID se usa para medir cobertura contra curva, pero no elimina personas repetidas bajo un mismo ID.
+- La hoja `IDs_Planificados_No_Reportados` incluye la columna `CO MEL`, tomada desde la curva, para facilitar el contacto del responsable.
