@@ -506,9 +506,12 @@ def process_files(curve_path: Path, report_paths: Sequence[Path]) -> Tuple[List[
             continue
         bucket = company_bucket.setdefault(
             norm,
-            {"EMPRESA": row["EMPRESA"], "ids_planificados": set(), "dotacion_planificada": 0.0},
+            {"EMPRESA": row["EMPRESA"], "ids_planificados": set(), "dotacion_planificada": 0.0, "contactos_spa_co": set()},
         )
         bucket["ids_planificados"].add(row["ID"])
+        contact = export_contact_value(row)
+        if contact:
+            bucket["contactos_spa_co"].add(contact)
         bucket["dotacion_planificada"] += float(row["DOTACION_PLANIFICADA"] or 0)
 
     missing_companies: List[Dict[str, Any]] = []
@@ -518,6 +521,7 @@ def process_files(curve_path: Path, report_paths: Sequence[Path]) -> Tuple[List[
             missing_companies.append(
                 {
                     "EMPRESA": bucket["EMPRESA"],
+                    "SPA/ CO": " | ".join(sorted(bucket.get("contactos_spa_co", set()))),
                     "ids_planificados": len(bucket["ids_planificados"]),
                     "dotacion_planificada": int(dot) if float(dot).is_integer() else round(dot, 2),
                 }
@@ -627,11 +631,37 @@ def styles_xml() -> str:
 </styleSheet>'''
 
 
+def export_contact_value(row: Dict[str, Any]) -> str:
+    """Devuelve el contacto SPA/CO de la curva.
+
+    En la BD se guarda como co_mel/CO MEL por compatibilidad con versiones anteriores,
+    pero en el Excel de faltantes se muestra con el nombre operativo de la curva: SPA/ CO.
+    """
+    return (
+        clean_text(row.get("SPA/ CO"))
+        or clean_text(row.get("SPA/CO"))
+        or clean_text(row.get("CO MEL"))
+        or clean_text(row.get("co_mel"))
+    )
+
+
 def write_output(path: Path, transformed: List[Dict[str, Any]], missing_ids: List[Dict[str, Any]], missing_companies: List[Dict[str, Any]], summary: Dict[str, Any]) -> None:
+    missing_ids_export = []
+    for row in missing_ids:
+        enriched = dict(row)
+        enriched["SPA/ CO"] = export_contact_value(row)
+        missing_ids_export.append(enriched)
+
+    missing_companies_export = []
+    for row in missing_companies:
+        enriched = dict(row)
+        enriched["SPA/ CO"] = export_contact_value(row)
+        missing_companies_export.append(enriched)
+
     sheets = [
         ("Formato_Final", transformed, TARGET_COLUMNS),
-        ("Empresas_Sin_Reportabilidad", missing_companies, ["EMPRESA", "ids_planificados", "dotacion_planificada"]),
-        ("IDs_Planificados_No_Reportados", missing_ids, ["ID", "EMPRESA", "NUMERO DE CONTRATO", "CO MEL", "DOTACION_PLANIFICADA"]),
+        ("Empresas_Sin_Reportabilidad", missing_companies_export, ["EMPRESA", "SPA/ CO", "ids_planificados", "dotacion_planificada"]),
+        ("IDs_Planificados_No_Reportados", missing_ids_export, ["ID", "EMPRESA", "NUMERO DE CONTRATO", "SPA/ CO", "DOTACION_PLANIFICADA"]),
         ("Resumen", [summary], list(summary.keys())),
     ]
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as z:
@@ -1226,6 +1256,7 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
             "EMPRESA": r.get("EMPRESA", ""),
             "NUMERO DE CONTRATO": r.get("NUMERO DE CONTRATO", ""),
             "CO MEL": r.get("CO MEL", ""),
+            "SPA/ CO": export_contact_value(r),
             "DOTACION_PLANIFICADA": clean_text(r.get("DOTACION_PLANIFICADA", "")),
         }
         for r in missing_ids
@@ -1236,8 +1267,11 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
         norm = row.get("EMPRESA_NORM") or normalize_company(row.get("EMPRESA"))
         if not norm:
             continue
-        bucket = company_bucket.setdefault(norm, {"EMPRESA": row.get("EMPRESA", ""), "ids_planificados": set(), "dotacion_planificada": 0.0})
+        bucket = company_bucket.setdefault(norm, {"EMPRESA": row.get("EMPRESA", ""), "ids_planificados": set(), "dotacion_planificada": 0.0, "contactos_spa_co": set()})
         bucket["ids_planificados"].add(row.get("ID"))
+        contact = export_contact_value(row)
+        if contact:
+            bucket["contactos_spa_co"].add(contact)
         try:
             bucket["dotacion_planificada"] += float(row.get("DOTACION_PLANIFICADA") or 0)
         except Exception:
@@ -1250,6 +1284,7 @@ def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[
             missing_companies.append(
                 {
                     "EMPRESA": bucket["EMPRESA"],
+                    "SPA/ CO": " | ".join(sorted(bucket.get("contactos_spa_co", set()))),
                     "ids_planificados": len(bucket["ids_planificados"]),
                     "dotacion_planificada": int(dot) if float(dot).is_integer() else round(dot, 2),
                 }

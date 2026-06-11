@@ -74,3 +74,12 @@ La unidad principal ya no es una carga aislada, sino una `semana`:
 
 - La hoja `Formato_Final` conserva todas las filas/personas cargadas desde las reportabilidades. El ID se usa para medir cobertura contra curva, pero no elimina personas repetidas bajo un mismo ID.
 - La hoja `IDs_Planificados_No_Reportados` incluye la columna `CO MEL`, tomada desde la curva, para facilitar el contacto del responsable.
+
+
+## Ajuste de exportación SPA/CO
+
+La hoja `IDs_Planificados_No_Reportados` exporta el contacto de la curva con el encabezado `SPA/ CO`, tomado desde la columna `SPA/ CO` de la hoja `Fcst_Autorizado VCA`.
+
+La hoja `Empresas_Sin_Reportabilidad` también muestra `SPA/ CO` consolidado por empresa para facilitar el contacto con el responsable.
+
+Si una semana fue creada antes de esta mejora y la columna aparece vacía, se debe entrar a la semana y usar `Actualizar curva` cargando nuevamente la curva correspondiente. Esto repuebla la planificación guardada en PostgreSQL con el contacto SPA/CO.
