@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero-card result-hero">
+  <div>
+    <div class="eyebrow">Semana acumulativa</div>
+    <h2>{{ meta.nombre_semana }}</h2>
+    <p>
+      Curva: <b>{{ meta.curve_filename }}</b> · Alcance: <b>{{ meta.summary.plan_scope }}</b> · Última actualización: {{ meta.updated_at }}
+    </p>
+  </div>
+  <div class="actions compact">
+    <a class="btn success" href="{{ url_for('descargar', semana_id=meta.semana_id) }}">Exportar Excel</a>
+    <a class="btn secondary" href="{{ url_for('historial') }}">Semanas</a>
+    <form action="{{ url_for('eliminar_semana', semana_id=meta.semana_id) }}" method="post" onsubmit="return confirm('¿Eliminar esta semana completa? Esta acción no se puede deshacer.');">
+      <button class="btn danger" type="submit">Eliminar semana</button>
+    </form>
+  </div>
+</section>
+
+<section class="kpis">
+  <div class="kpi"><span>IDs curva</span><strong>{{ meta.summary.planned_ids }}</strong></div>
+  <div class="kpi"><span>IDs reportados</span><strong>{{ meta.summary.reported_ids }}</strong></div>
+  <div class="kpi"><span>IDs con match</span><strong>{{ meta.summary.matched_ids }}</strong></div>
+  <div class="kpi"><span>IDs faltantes</span><strong>{{ meta.summary.missing_ids }}</strong></div>
+  <div class="kpi"><span>Empresas sin reporte</span><strong>{{ meta.summary.missing_companies }}</strong></div>
+  <div class="kpi"><span>Archivos cargados</span><strong>{{ meta.summary.report_files }}</strong></div>
+</section>
+
+<section class="grid">
+  <div class="card">
+    <h2>Agregar reportabilidad a esta semana</h2>
+    <form action="{{ url_for('agregar_reportabilidad', semana_id=meta.semana_id) }}" method="post" enctype="multipart/form-data">
+      <div class="uploadbox">
+        <label>Reportabilidad / dotación de empresa</label>
+        <input type="file" name="reportabilidad" accept=".xlsx,.xlsm" multiple required>
+        <small>Puedes cargar una o varias empresas hoy, y volver mañana a cargar más en la misma semana.</small>
+      </div>
+      <div class="actions right">
+        <button class="btn primary" type="submit">Agregar a semana</button>
+      </div>
+    </form>
+  </div>
+  <div class="card">
+    <h2>Actualizar curva de la semana</h2>
+    <form action="{{ url_for('reemplazar_curva', semana_id=meta.semana_id) }}" method="post" enctype="multipart/form-data" onsubmit="return confirm('¿Reemplazar la curva de esta semana? Las reportabilidades cargadas se mantendrán.');">
+      <div class="uploadbox">
+        <label>Nueva curva de poblamiento</label>
+        <input type="file" name="curva" accept=".xlsx,.xlsm" required>
+        <small>La curva anterior se reemplaza. Las reportabilidades ya cargadas se cruzan contra la nueva curva.</small>
+      </div>
+      <div class="actions right">
+        <button class="btn secondary" type="submit">Reemplazar curva</button>
+      </div>
+    </form>
+  </div>
+</section>
+
+<section class="card full">
+  <h2>Reportabilidades cargadas en esta semana</h2>
+  {% if meta.archivos %}
+    <div class="tablewrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Fecha carga</th>
+            <th>Archivo</th>
+            <th>Empresa detectada</th>
+            <th>Filas</th>
+            <th>IDs únicos</th>
+            <th>Acción</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in meta.archivos %}
+          <tr>
+            <td>{{ a.created_at }}</td>
+            <td>{{ a.filename }}</td>
+            <td>{{ a.company_display or '-' }}</td>
+            <td>{{ a.rows_imported }}</td>
+            <td>{{ a.ids_reported }}</td>
+            <td class="row-actions">
+              <form action="{{ url_for('eliminar_archivo', semana_id=meta.semana_id, archivo_id=a.archivo_id) }}" method="post" onsubmit="return confirm('¿Eliminar esta reportabilidad de la semana? El cruce se recalculará con los archivos restantes.');">
+                <button class="btn tiny danger" type="submit">Eliminar archivo</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="notice error">Esta semana aún no tiene reportabilidades cargadas. La curva está guardada y puedes alimentarla cuando recibas archivos.</div>
+  {% endif %}
+</section>
+
+<section class="grid">
+  <div class="card full">
+    <h2>Empresas con dotación planificada sin reportabilidad detectada</h2>
+    {% if meta.missing_companies %}
+    <div class="tablewrap"><table><thead><tr><th>Empresa</th><th>IDs planificados</th><th>Dotación planificada</th></tr></thead><tbody>
+      {% for row in meta.missing_companies %}<tr><td>{{ row.EMPRESA }}</td><td>{{ row.ids_planificados }}</td><td>{{ row.dotacion_planificada }}</td></tr>{% endfor %}
+    </tbody></table></div>
+    {% else %}<div class="notice ok">No se detectaron empresas sin reportabilidad, según las cargas actuales.</div>{% endif %}
+  </div>
+  <div class="card full">
+    <h2>IDs planificados no reportados</h2>
+    {% if meta.missing_ids %}
+    <div class="tablewrap"><table><thead><tr><th>ID</th><th>Empresa</th><th>Contrato</th><th>Dotación planificada</th></tr></thead><tbody>
+      {% for row in meta.missing_ids %}<tr><td>{{ row.ID }}</td><td>{{ row.EMPRESA }}</td><td>{{ row['NUMERO DE CONTRATO'] }}</td><td>{{ row.DOTACION_PLANIFICADA }}</td></tr>{% endfor %}
+    </tbody></table></div>
+    {% else %}<div class="notice ok">Todos los IDs planificados fueron encontrados en las reportabilidades cargadas.</div>{% endif %}
+  </div>
+  <div class="card full">
+    <h2>Vista previa del formato final acumulado</h2>
+    {% if meta.preview %}
+    <div class="tablewrap"><table><thead><tr>{% for col in target_columns %}<th>{{ col }}</th>{% endfor %}</tr></thead><tbody>
+      {% for row in meta.preview %}<tr>{% for col in target_columns %}<td>{{ row[col] }}</td>{% endfor %}</tr>{% endfor %}
+    </tbody></table></div>
+    {% else %}<div class="notice error">Todavía no hay filas transformadas porque no se han cargado reportabilidades.</div>{% endif %}
+  </div>
+</section>
+{% endblock %}

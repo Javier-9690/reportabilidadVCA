@@ -1,19 +1,37 @@
-# Reportabilidad VCA 5400 - PostgreSQL
+# Reportabilidad VCA 5400 - Semanas acumulativas
 
-Aplicación Flask para Render que procesa curva de poblamiento y reportabilidades por empresa, cruza por ID y guarda el resultado en PostgreSQL.
+Aplicación Flask para Render.com orientada a controlar reportabilidades semanales de Campamento 5400.
 
-## Funciones
+## Funcionalidad principal
 
-- Importar curva de poblamiento.
-- Leer hoja `Fcst_Autorizado VCA`.
-- Importar una o varias reportabilidades/dotaciones.
-- Cruzar `ID de la solicitud` contra `N° DE ID`.
-- Detectar IDs planificados no reportados.
-- Detectar empresas con dotación planificada sin reportabilidad.
-- Exportar Excel final.
-- Guardar historial en PostgreSQL.
-- Descargar reportes guardados desde la BD.
-- Eliminar reportabilidades guardadas.
+- Crear una semana con su curva de poblamiento.
+- Leer la hoja `Fcst_Autorizado VCA` desde la curva.
+- Guardar la planificación semanal en PostgreSQL.
+- Cargar reportabilidades de empresas de forma incremental durante varios días.
+- Eliminar una reportabilidad específica sin borrar la semana completa.
+- Reemplazar la curva de una semana manteniendo las reportabilidades ya cargadas.
+- Recalcular automáticamente:
+  - IDs planificados.
+  - IDs reportados.
+  - IDs faltantes.
+  - Empresas con dotación planificada sin reportabilidad.
+- Exportar el Excel final normalizado.
+
+## Formato final exportado
+
+Columnas:
+
+- ID
+- MODULO
+- RUT (CON GUION)
+- NOMBRE COMPLETO
+- EMPRESA
+- NUMERO DE CONTRATO
+- GERENCIA
+- SISTEMA DE TURNO
+- CO MEL
+- GENERO
+- NOMBRE DE TURNO
 
 ## Render
 
@@ -29,19 +47,25 @@ Start Command:
 gunicorn --workers 1 --threads 2 --timeout 240 app:app
 ```
 
-Variables de entorno necesarias:
+Variables de entorno:
 
 ```text
 PYTHON_VERSION=3.11.11
-DATABASE_URL=<Internal Database URL de PostgreSQL en Render>
-SECRET_KEY=<valor seguro>
+DATABASE_URL=<cadena PostgreSQL de Render>
+SECRET_KEY=<clave segura>
 ```
 
-## Tablas creadas automáticamente
+## Dependencias
 
-- `reportabilidad_procesos`
-- `reportabilidad_formato`
-- `reportabilidad_missing_ids`
-- `reportabilidad_missing_empresas`
+No usa pandas ni openpyxl para lectura de archivos de entrada. La lectura XLSX se realiza directamente sobre el XML interno del archivo para evitar timeouts con planillas pesadas.
 
-La app crea estas tablas al iniciar si `DATABASE_URL` está configurada.
+## Modelo acumulativo
+
+La unidad principal ya no es una carga aislada, sino una `semana`:
+
+1. Se crea la semana con una curva.
+2. La semana queda guardada en PostgreSQL.
+3. Puedes agregar reportabilidades a esa misma semana durante varios días.
+4. Cada archivo cargado queda individualizado.
+5. Puedes eliminar un archivo puntual si una empresa envió una versión errónea.
+6. El Excel se genera siempre desde el estado actual de la semana.

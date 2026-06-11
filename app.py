@@ -643,7 +643,7 @@ def write_output(path: Path, transformed: List[Dict[str, Any]], missing_ids: Lis
 
 
 # -----------------------------
-# Persistencia en PostgreSQL
+# Persistencia acumulativa en PostgreSQL
 # -----------------------------
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or os.environ.get("POSTGRESQL_URL")
 _DB_INITIALIZED = False
@@ -679,8 +679,6 @@ def get_db_connection():
     if use_ssl:
         ssl_context = ssl.create_default_context()
         if sslmode == "require":
-            # Render suele entregar cadenas con sslmode=require. En ese modo se cifra la conexión
-            # sin exigir validación estricta de hostname/certificado.
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
 
@@ -712,6 +710,7 @@ def execute_db(sql: str, params: Optional[Sequence[Any]] = None, fetch: bool = F
 
 
 def init_db() -> bool:
+    """Crea el modelo acumulativo. Mantiene tablas históricas anteriores si existían."""
     global _DB_INITIALIZED, _DB_LAST_ERROR
     if _DB_INITIALIZED:
         return True
@@ -726,23 +725,54 @@ def init_db() -> bool:
         cur = conn.cursor()
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS reportabilidad_procesos (
-                job_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS reportabilidad_semanas (
+                semana_id TEXT PRIMARY KEY,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                descripcion TEXT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                nombre_semana TEXT NOT NULL,
                 curve_filename TEXT NOT NULL,
-                report_filenames TEXT NOT NULL,
                 curve_sheet TEXT,
                 plan_scope TEXT,
-                summary_json TEXT NOT NULL
+                plan_columns_used INTEGER DEFAULT 0,
+                plan_summary_json TEXT NOT NULL DEFAULT '{}'
             );
             """
         )
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS reportabilidad_formato (
+            CREATE TABLE IF NOT EXISTS reportabilidad_planificacion (
                 id BIGSERIAL PRIMARY KEY,
-                job_id TEXT NOT NULL REFERENCES reportabilidad_procesos(job_id) ON DELETE CASCADE,
+                semana_id TEXT NOT NULL REFERENCES reportabilidad_semanas(semana_id) ON DELETE CASCADE,
+                id_solicitud TEXT NOT NULL,
+                empresa TEXT,
+                empresa_norm TEXT,
+                numero_contrato TEXT,
+                dotacion_planificada NUMERIC,
+                dotacion_dias_sumada NUMERIC,
+                UNIQUE (semana_id, id_solicitud)
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reportabilidad_archivos (
+                archivo_id TEXT PRIMARY KEY,
+                semana_id TEXT NOT NULL REFERENCES reportabilidad_semanas(semana_id) ON DELETE CASCADE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                filename TEXT NOT NULL,
+                rows_imported INTEGER NOT NULL DEFAULT 0,
+                ids_reported INTEGER NOT NULL DEFAULT 0,
+                company_display TEXT,
+                company_norm TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reportabilidad_formato_v2 (
+                id BIGSERIAL PRIMARY KEY,
+                semana_id TEXT NOT NULL REFERENCES reportabilidad_semanas(semana_id) ON DELETE CASCADE,
+                archivo_id TEXT NOT NULL REFERENCES reportabilidad_archivos(archivo_id) ON DELETE CASCADE,
                 fila INTEGER NOT NULL,
                 id_solicitud TEXT,
                 modulo TEXT,
@@ -758,33 +788,11 @@ def init_db() -> bool:
             );
             """
         )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reportabilidad_missing_ids (
-                id BIGSERIAL PRIMARY KEY,
-                job_id TEXT NOT NULL REFERENCES reportabilidad_procesos(job_id) ON DELETE CASCADE,
-                id_solicitud TEXT,
-                empresa TEXT,
-                numero_contrato TEXT,
-                dotacion_planificada TEXT
-            );
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reportabilidad_missing_empresas (
-                id BIGSERIAL PRIMARY KEY,
-                job_id TEXT NOT NULL REFERENCES reportabilidad_procesos(job_id) ON DELETE CASCADE,
-                empresa TEXT,
-                ids_planificados INTEGER,
-                dotacion_planificada TEXT
-            );
-            """
-        )
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_reportabilidad_procesos_created ON reportabilidad_procesos(created_at DESC);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_reportabilidad_formato_job ON reportabilidad_formato(job_id, fila);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_reportabilidad_missing_ids_job ON reportabilidad_missing_ids(job_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_reportabilidad_missing_empresas_job ON reportabilidad_missing_empresas(job_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rep_sem_updated ON reportabilidad_semanas(updated_at DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rep_plan_sem ON reportabilidad_planificacion(semana_id, id_solicitud);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rep_arch_sem ON reportabilidad_archivos(semana_id, created_at DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rep_fmt_sem ON reportabilidad_formato_v2(semana_id, id_solicitud);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rep_fmt_arch ON reportabilidad_formato_v2(archivo_id);")
         conn.commit()
         cur.close()
         conn.close()
@@ -803,10 +811,6 @@ def before_request_init_db():
         init_db()
 
 
-def summary_for_storage(summary: Dict[str, Any]) -> str:
-    return json.dumps(summary, ensure_ascii=False)
-
-
 def parse_summary(value: Any) -> Dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -816,47 +820,240 @@ def parse_summary(value: Any) -> Dict[str, Any]:
         return {}
 
 
-def save_processing_to_db(
-    job: str,
-    descripcion: str,
-    curve_filename: str,
-    report_filenames: Sequence[str],
-    transformed: List[Dict[str, Any]],
-    missing_ids: List[Dict[str, Any]],
-    missing_companies: List[Dict[str, Any]],
-    summary: Dict[str, Any],
-) -> bool:
-    if not init_db():
-        return False
+def json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
+
+# -----------------------------
+# Lectura lógica de curva y reportabilidades
+# -----------------------------
+def parse_curve_planning(curve_path: Path) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    curve_sheet = find_sheet(curve_path, "Fcst_Autorizado VCA")
+    curve_records, curve_metas, curve_header_row = read_sheet_records(
+        curve_path,
+        curve_sheet,
+        required_any=["ID de la solicitud", "Empresa", "Número Contrato"],
+        max_cols=DEFAULT_SCAN_MAX_COLS,
+    )
+    curve_headers = [m["key"] for m in curve_metas]
+    curve_id_col = pick_column_from_headers(curve_headers, CURVE_ID_COLS)
+    curve_company_col = pick_column_from_headers(curve_headers, CURVE_COMPANY_COLS)
+    curve_contract_col = pick_column_from_headers(curve_headers, CURVE_CONTRACT_COLS)
+    if not curve_id_col or not curve_company_col:
+        raise ValueError("No se pudo detectar ID de la solicitud y Empresa en la hoja Fcst_Autorizado VCA.")
+
+    plan_keys, plan_scope = detect_plan_keys(curve_path, curve_sheet, curve_metas, curve_header_row)
+    if not plan_keys:
+        raise ValueError("No se pudieron detectar columnas de dotación planificada en la curva.")
+
+    planned_by_id: Dict[str, Dict[str, Any]] = {}
+    for record in curve_records:
+        row_id = normalize_id(record.get(curve_id_col))
+        company = clean_text(record.get(curve_company_col))
+        planned_max = max_planned_value(record, plan_keys)
+        if not row_id or planned_max <= 0:
+            continue
+        # Si el mismo ID aparece más de una vez en la curva, conserva el mayor valor planificado.
+        current = planned_by_id.get(row_id)
+        candidate = {
+            "ID": row_id,
+            "EMPRESA": company,
+            "EMPRESA_NORM": normalize_company(company),
+            "NUMERO DE CONTRATO": clean_text(record.get(curve_contract_col)) if curve_contract_col else "",
+            "DOTACION_PLANIFICADA": int(planned_max) if float(planned_max).is_integer() else planned_max,
+            "DOTACION_DIAS_SUMADA": sum_planned_days(record, plan_keys),
+        }
+        if current is None or float(candidate["DOTACION_PLANIFICADA"] or 0) > float(current["DOTACION_PLANIFICADA"] or 0):
+            planned_by_id[row_id] = candidate
+
+    planned_rows = list(planned_by_id.values())
+    planned_companies = {r["EMPRESA_NORM"] for r in planned_rows if r.get("EMPRESA_NORM")}
+    summary = {
+        "curve_sheet": curve_sheet,
+        "plan_scope": plan_scope,
+        "planned_ids": len(planned_rows),
+        "planned_companies": len(planned_companies),
+        "plan_columns_used": len(plan_keys),
+    }
+    return planned_rows, summary
+
+
+def parse_reportability_file(report_path: Path) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
+    report_sheet = find_sheet(report_path, "Hoja1")
+    report_records, report_metas, _ = read_sheet_records(
+        report_path,
+        report_sheet,
+        required_any=["N° DE ID", "RUT", "Nombre Huésped", "Empresa"],
+        max_cols=REPORT_SCAN_MAX_COLS,
+    )
+    report_headers = [m["key"] for m in report_metas]
+    report_id_col = pick_column_from_headers(report_headers, SYNONYMS["ID"])
+    report_emp_col = pick_column_from_headers(report_headers, SYNONYMS["EMPRESA"])
+    if not report_id_col:
+        raise ValueError(f"No se pudo detectar la columna ID en {report_path.name}. Se espera N° DE ID o equivalente.")
+
+    rows: List[Dict[str, str]] = []
+    company_counter: Dict[str, Dict[str, Any]] = {}
+    ids: set[str] = set()
+    for record in report_records:
+        row_id = normalize_id(record.get(report_id_col))
+        if not row_id:
+            continue
+        out = row_to_output(record, report_headers)
+        if not out["ID"]:
+            continue
+        rows.append(out)
+        ids.add(out["ID"])
+        company_display = clean_text(record.get(report_emp_col)) if report_emp_col else out.get("EMPRESA", "")
+        company_norm = normalize_company(company_display)
+        if company_norm:
+            bucket = company_counter.setdefault(company_norm, {"display": company_display, "count": 0})
+            bucket["count"] += 1
+
+    company_display = ""
+    company_norm = ""
+    if company_counter:
+        company_norm, bucket = sorted(company_counter.items(), key=lambda item: item[1]["count"], reverse=True)[0]
+        company_display = bucket["display"]
+
+    stats = {
+        "sheet": report_sheet,
+        "rows_imported": len(rows),
+        "ids_reported": len(ids),
+        "company_display": company_display,
+        "company_norm": company_norm,
+    }
+    return rows, stats
+
+
+# -----------------------------
+# Escritura y lectura de semana acumulativa
+# -----------------------------
+def create_week_in_db(semana_id: str, nombre_semana: str, curve_filename: str, planned_rows: List[Dict[str, Any]], plan_summary: Dict[str, Any]) -> None:
+    if not init_db():
+        raise RuntimeError(_DB_LAST_ERROR or "No se pudo inicializar PostgreSQL.")
     conn = get_db_connection()
     try:
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO reportabilidad_procesos
-            (job_id, descripcion, curve_filename, report_filenames, curve_sheet, plan_scope, summary_json)
+            INSERT INTO reportabilidad_semanas
+            (semana_id, nombre_semana, curve_filename, curve_sheet, plan_scope, plan_columns_used, plan_summary_json)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                job,
-                descripcion,
+                semana_id,
+                nombre_semana,
                 curve_filename,
-                json.dumps(list(report_filenames), ensure_ascii=False),
-                summary.get("curve_sheet", ""),
-                summary.get("plan_scope", ""),
-                summary_for_storage(summary),
+                plan_summary.get("curve_sheet", ""),
+                plan_summary.get("plan_scope", ""),
+                int(plan_summary.get("plan_columns_used") or 0),
+                json_dumps(plan_summary),
             ),
         )
-        for fila, row in enumerate(transformed, start=1):
+        insert_planning_rows(cur, semana_id, planned_rows)
+        conn.commit()
+        cur.close()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def insert_planning_rows(cur, semana_id: str, planned_rows: List[Dict[str, Any]]) -> None:
+    for row in planned_rows:
+        cur.execute(
+            """
+            INSERT INTO reportabilidad_planificacion
+            (semana_id, id_solicitud, empresa, empresa_norm, numero_contrato, dotacion_planificada, dotacion_dias_sumada)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (semana_id, id_solicitud)
+            DO UPDATE SET
+                empresa = EXCLUDED.empresa,
+                empresa_norm = EXCLUDED.empresa_norm,
+                numero_contrato = EXCLUDED.numero_contrato,
+                dotacion_planificada = EXCLUDED.dotacion_planificada,
+                dotacion_dias_sumada = EXCLUDED.dotacion_dias_sumada
+            """,
+            (
+                semana_id,
+                row.get("ID", ""),
+                row.get("EMPRESA", ""),
+                row.get("EMPRESA_NORM", ""),
+                row.get("NUMERO DE CONTRATO", ""),
+                row.get("DOTACION_PLANIFICADA", 0),
+                row.get("DOTACION_DIAS_SUMADA", 0),
+            ),
+        )
+
+
+def replace_week_curve(semana_id: str, curve_filename: str, planned_rows: List[Dict[str, Any]], plan_summary: Dict[str, Any]) -> None:
+    if not init_db():
+        raise RuntimeError(_DB_LAST_ERROR or "No se pudo inicializar PostgreSQL.")
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM reportabilidad_planificacion WHERE semana_id = %s", (semana_id,))
+        cur.execute(
+            """
+            UPDATE reportabilidad_semanas
+            SET updated_at = NOW(), curve_filename = %s, curve_sheet = %s, plan_scope = %s,
+                plan_columns_used = %s, plan_summary_json = %s
+            WHERE semana_id = %s
+            """,
+            (
+                curve_filename,
+                plan_summary.get("curve_sheet", ""),
+                plan_summary.get("plan_scope", ""),
+                int(plan_summary.get("plan_columns_used") or 0),
+                json_dumps(plan_summary),
+                semana_id,
+            ),
+        )
+        insert_planning_rows(cur, semana_id, planned_rows)
+        conn.commit()
+        cur.close()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def save_reportability_upload(semana_id: str, filename: str, rows: List[Dict[str, str]], stats: Dict[str, Any]) -> str:
+    if not init_db():
+        raise RuntimeError(_DB_LAST_ERROR or "No se pudo inicializar PostgreSQL.")
+    archivo_id = uuid.uuid4().hex[:12]
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO reportabilidad_archivos
+            (archivo_id, semana_id, filename, rows_imported, ids_reported, company_display, company_norm)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                archivo_id,
+                semana_id,
+                filename,
+                int(stats.get("rows_imported") or len(rows)),
+                int(stats.get("ids_reported") or 0),
+                stats.get("company_display", ""),
+                stats.get("company_norm", ""),
+            ),
+        )
+        for fila, row in enumerate(rows, start=1):
             cur.execute(
                 """
-                INSERT INTO reportabilidad_formato
-                (job_id, fila, id_solicitud, modulo, rut, nombre_completo, empresa, numero_contrato, gerencia, sistema_turno, co_mel, genero, nombre_turno)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO reportabilidad_formato_v2
+                (semana_id, archivo_id, fila, id_solicitud, modulo, rut, nombre_completo, empresa, numero_contrato, gerencia, sistema_turno, co_mel, genero, nombre_turno)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    job,
+                    semana_id,
+                    archivo_id,
                     fila,
                     row.get("ID", ""),
                     row.get("MODULO", ""),
@@ -871,38 +1068,10 @@ def save_processing_to_db(
                     row.get("NOMBRE DE TURNO", ""),
                 ),
             )
-        for row in missing_ids:
-            cur.execute(
-                """
-                INSERT INTO reportabilidad_missing_ids
-                (job_id, id_solicitud, empresa, numero_contrato, dotacion_planificada)
-                VALUES (%s, %s, %s, %s, %s)
-                """,
-                (
-                    job,
-                    row.get("ID", ""),
-                    row.get("EMPRESA", ""),
-                    row.get("NUMERO DE CONTRATO", ""),
-                    clean_text(row.get("DOTACION_PLANIFICADA", "")),
-                ),
-            )
-        for row in missing_companies:
-            cur.execute(
-                """
-                INSERT INTO reportabilidad_missing_empresas
-                (job_id, empresa, ids_planificados, dotacion_planificada)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (
-                    job,
-                    row.get("EMPRESA", ""),
-                    int(row.get("ids_planificados") or 0),
-                    clean_text(row.get("dotacion_planificada", "")),
-                ),
-            )
+        cur.execute("UPDATE reportabilidad_semanas SET updated_at = NOW() WHERE semana_id = %s", (semana_id,))
         conn.commit()
         cur.close()
-        return True
+        return archivo_id
     except Exception:
         conn.rollback()
         raise
@@ -910,164 +1079,252 @@ def save_processing_to_db(
         conn.close()
 
 
-def rows_to_output(rows: Sequence[Tuple[Any, ...]]) -> List[Dict[str, Any]]:
-    result = []
-    for row in rows:
-        result.append(
-            {
-                "ID": row[0] or "",
-                "MODULO": row[1] or "",
-                "RUT (CON GUION)": row[2] or "",
-                "NOMBRE COMPLETO": row[3] or "",
-                "EMPRESA": row[4] or "",
-                "NUMERO DE CONTRATO": row[5] or "",
-                "GERENCIA": row[6] or "",
-                "SISTEMA DE TURNO": row[7] or "",
-                "CO MEL": row[8] or "",
-                "GENERO": row[9] or "",
-                "NOMBRE DE TURNO": row[10] or "",
-            }
-        )
-    return result
-
-
-def load_processing_from_db(job: str, preview_only: bool = False) -> Optional[Dict[str, Any]]:
+def get_week_base(semana_id: str) -> Optional[Dict[str, Any]]:
     if not init_db():
+        return None
+    rows = execute_db(
+        """
+        SELECT semana_id, created_at, updated_at, nombre_semana, curve_filename, curve_sheet, plan_scope, plan_columns_used, plan_summary_json
+        FROM reportabilidad_semanas
+        WHERE semana_id = %s
+        """,
+        (semana_id,),
+        fetch=True,
+    ) or []
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "semana_id": row[0],
+        "created_at": row[1].strftime("%Y-%m-%d %H:%M:%S") if hasattr(row[1], "strftime") else clean_text(row[1]),
+        "updated_at": row[2].strftime("%Y-%m-%d %H:%M:%S") if hasattr(row[2], "strftime") else clean_text(row[2]),
+        "nombre_semana": row[3] or "",
+        "curve_filename": row[4] or "",
+        "curve_sheet": row[5] or "",
+        "plan_scope": row[6] or "",
+        "plan_columns_used": row[7] or 0,
+        "plan_summary": parse_summary(row[8]),
+    }
+
+
+def load_week_state(semana_id: str, preview_only: bool = True) -> Optional[Dict[str, Any]]:
+    base = get_week_base(semana_id)
+    if not base:
         return None
     conn = get_db_connection()
     try:
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT job_id, created_at, descripcion, curve_filename, report_filenames, summary_json
-            FROM reportabilidad_procesos
-            WHERE job_id = %s
-            """,
-            (job,),
-        )
-        proc = cur.fetchone()
-        if not proc:
-            cur.close()
-            return None
-        limit_sql = "LIMIT 20" if preview_only else ""
-        cur.execute(
-            f"""
-            SELECT id_solicitud, modulo, rut, nombre_completo, empresa, numero_contrato, gerencia, sistema_turno, co_mel, genero, nombre_turno
-            FROM reportabilidad_formato
-            WHERE job_id = %s
-            ORDER BY fila
-            {limit_sql}
-            """,
-            (job,),
-        )
-        transformed = rows_to_output(cur.fetchall())
-        cur.execute(
-            """
-            SELECT id_solicitud, empresa, numero_contrato, dotacion_planificada
-            FROM reportabilidad_missing_ids
-            WHERE job_id = %s
+            SELECT id_solicitud, empresa, empresa_norm, numero_contrato, dotacion_planificada, dotacion_dias_sumada
+            FROM reportabilidad_planificacion
+            WHERE semana_id = %s
             ORDER BY empresa, id_solicitud
             """,
-            (job,),
+            (semana_id,),
         )
-        missing_ids = [
-            {"ID": r[0] or "", "EMPRESA": r[1] or "", "NUMERO DE CONTRATO": r[2] or "", "DOTACION_PLANIFICADA": r[3] or ""}
+        plan_rows = [
+            {
+                "ID": r[0] or "",
+                "EMPRESA": r[1] or "",
+                "EMPRESA_NORM": r[2] or "",
+                "NUMERO DE CONTRATO": r[3] or "",
+                "DOTACION_PLANIFICADA": r[4] or 0,
+                "DOTACION_DIAS_SUMADA": r[5] or 0,
+            }
             for r in cur.fetchall()
         ]
         cur.execute(
             """
-            SELECT empresa, ids_planificados, dotacion_planificada
-            FROM reportabilidad_missing_empresas
-            WHERE job_id = %s
-            ORDER BY empresa
+            SELECT archivo_id, created_at, filename, rows_imported, ids_reported, company_display
+            FROM reportabilidad_archivos
+            WHERE semana_id = %s
+            ORDER BY created_at DESC
             """,
-            (job,),
+            (semana_id,),
         )
-        missing_companies = [
-            {"EMPRESA": r[0] or "", "ids_planificados": r[1] or 0, "dotacion_planificada": r[2] or ""}
+        archivos = [
+            {
+                "archivo_id": r[0],
+                "created_at": r[1].strftime("%Y-%m-%d %H:%M:%S") if hasattr(r[1], "strftime") else clean_text(r[1]),
+                "filename": r[2] or "",
+                "rows_imported": r[3] or 0,
+                "ids_reported": r[4] or 0,
+                "company_display": r[5] or "",
+            }
             for r in cur.fetchall()
         ]
+        cur.execute(
+            """
+            SELECT f.id, f.id_solicitud, f.modulo, f.rut, f.nombre_completo, f.empresa, f.numero_contrato,
+                   f.gerencia, f.sistema_turno, f.co_mel, f.genero, f.nombre_turno, a.created_at
+            FROM reportabilidad_formato_v2 f
+            JOIN reportabilidad_archivos a ON a.archivo_id = f.archivo_id
+            WHERE f.semana_id = %s
+            ORDER BY a.created_at ASC, f.id ASC
+            """,
+            (semana_id,),
+        )
+        report_rows_raw = cur.fetchall()
         cur.close()
-        summary = parse_summary(proc[5])
-        return {
-            "job": proc[0],
-            "created_at": proc[1].strftime("%Y-%m-%d %H:%M:%S") if hasattr(proc[1], "strftime") else clean_text(proc[1]),
-            "descripcion": proc[2] or "",
-            "curve_filename": proc[3] or "",
-            "report_filenames": parse_summary(proc[4]) if proc[4] else [],
-            "summary": summary,
-            "preview": transformed[:20],
-            "transformed_all": transformed,
-            "missing_ids": missing_ids[:80] if preview_only else missing_ids,
-            "missing_companies": missing_companies[:80] if preview_only else missing_companies,
-            "source": "db",
-        }
     finally:
         conn.close()
 
+    # Deduplicación por ID: si se carga el mismo ID otra vez, se conserva la última carga.
+    dedup: Dict[str, Dict[str, Any]] = {}
+    for r in report_rows_raw:
+        row_id = normalize_id(r[1])
+        if not row_id:
+            continue
+        dedup[row_id] = {
+            "ID": row_id,
+            "MODULO": r[2] or "",
+            "RUT (CON GUION)": r[3] or "",
+            "NOMBRE COMPLETO": r[4] or "",
+            "EMPRESA": r[5] or "",
+            "NUMERO DE CONTRATO": r[6] or "",
+            "GERENCIA": r[7] or "",
+            "SISTEMA DE TURNO": r[8] or "",
+            "CO MEL": r[9] or "",
+            "GENERO": r[10] or "",
+            "NOMBRE DE TURNO": r[11] or "",
+        }
+    transformed_all = list(dedup.values())
 
-def list_processings_from_db() -> List[Dict[str, Any]]:
+    planned_ids = {r["ID"] for r in plan_rows if r.get("ID")}
+    reported_ids = set(dedup.keys())
+    plan_by_id = {r["ID"]: r for r in plan_rows if r.get("ID")}
+
+    reported_companies: set[str] = set()
+    for row in transformed_all:
+        norm = normalize_company(row.get("EMPRESA"))
+        if norm:
+            reported_companies.add(norm)
+    # Si un ID planificado fue reportado, la empresa de la curva también cuenta como reportada.
+    for row_id in reported_ids:
+        plan_row = plan_by_id.get(row_id)
+        if plan_row and plan_row.get("EMPRESA_NORM"):
+            reported_companies.add(plan_row["EMPRESA_NORM"])
+
+    missing_ids = sorted(
+        [r for r in plan_rows if r.get("ID") not in reported_ids],
+        key=lambda r: (normalize_company(r.get("EMPRESA")), r.get("ID", "")),
+    )
+    missing_ids_out = [
+        {
+            "ID": r.get("ID", ""),
+            "EMPRESA": r.get("EMPRESA", ""),
+            "NUMERO DE CONTRATO": r.get("NUMERO DE CONTRATO", ""),
+            "DOTACION_PLANIFICADA": clean_text(r.get("DOTACION_PLANIFICADA", "")),
+        }
+        for r in missing_ids
+    ]
+
+    company_bucket: Dict[str, Dict[str, Any]] = {}
+    for row in plan_rows:
+        norm = row.get("EMPRESA_NORM") or normalize_company(row.get("EMPRESA"))
+        if not norm:
+            continue
+        bucket = company_bucket.setdefault(norm, {"EMPRESA": row.get("EMPRESA", ""), "ids_planificados": set(), "dotacion_planificada": 0.0})
+        bucket["ids_planificados"].add(row.get("ID"))
+        try:
+            bucket["dotacion_planificada"] += float(row.get("DOTACION_PLANIFICADA") or 0)
+        except Exception:
+            pass
+
+    missing_companies = []
+    for norm, bucket in company_bucket.items():
+        if norm not in reported_companies:
+            dot = bucket["dotacion_planificada"]
+            missing_companies.append(
+                {
+                    "EMPRESA": bucket["EMPRESA"],
+                    "ids_planificados": len(bucket["ids_planificados"]),
+                    "dotacion_planificada": int(dot) if float(dot).is_integer() else round(dot, 2),
+                }
+            )
+    missing_companies.sort(key=lambda r: normalize_company(r["EMPRESA"]))
+
+    summary = {
+        "curve_sheet": base["curve_sheet"],
+        "plan_scope": base["plan_scope"],
+        "planned_ids": len(planned_ids),
+        "reported_ids": len(reported_ids),
+        "matched_ids": len(planned_ids.intersection(reported_ids)),
+        "missing_ids": len(planned_ids - reported_ids),
+        "planned_companies": len(company_bucket),
+        "reported_companies": len(reported_companies),
+        "missing_companies": len(missing_companies),
+        "transformed_rows": len(transformed_all),
+        "plan_columns_used": base["plan_columns_used"],
+        "report_files": len(archivos),
+        "curve_filename": base["curve_filename"],
+        "nombre_semana": base["nombre_semana"],
+        "updated_at": base["updated_at"],
+    }
+    return {
+        **base,
+        "job": semana_id,
+        "summary": summary,
+        "archivos": archivos,
+        "preview": transformed_all[:20] if preview_only else transformed_all,
+        "transformed_all": transformed_all,
+        "missing_ids": missing_ids_out[:80] if preview_only else missing_ids_out,
+        "missing_companies": missing_companies[:80] if preview_only else missing_companies,
+    }
+
+
+def list_weeks() -> List[Dict[str, Any]]:
     if not init_db():
         return []
     rows = execute_db(
         """
-        SELECT job_id, created_at, descripcion, curve_filename, report_filenames, summary_json
-        FROM reportabilidad_procesos
-        ORDER BY created_at DESC
-        LIMIT 200
+        SELECT semana_id
+        FROM reportabilidad_semanas
+        ORDER BY updated_at DESC
+        LIMIT 150
         """,
         fetch=True,
     ) or []
-    result: List[Dict[str, Any]] = []
+    weeks = []
     for row in rows:
-        summary = parse_summary(row[5])
-        result.append(
-            {
-                "job": row[0],
-                "created_at": row[1].strftime("%Y-%m-%d %H:%M:%S") if hasattr(row[1], "strftime") else clean_text(row[1]),
-                "descripcion": row[2] or "",
-                "curve_filename": row[3] or "",
-                "report_filenames": parse_summary(row[4]) if row[4] else [],
-                "summary": summary,
-            }
-        )
-    return result
+        state = load_week_state(row[0], preview_only=True)
+        if state:
+            weeks.append(state)
+    return weeks
 
 
-def delete_processing_from_db(job: str) -> bool:
+def delete_week_from_db(semana_id: str) -> None:
     if not init_db():
-        return False
-    execute_db("DELETE FROM reportabilidad_procesos WHERE job_id = %s", (job,))
-    return True
+        raise RuntimeError(_DB_LAST_ERROR or "No se pudo inicializar PostgreSQL.")
+    execute_db("DELETE FROM reportabilidad_semanas WHERE semana_id = %s", (semana_id,))
 
 
-def load_meta_fallback(job: str) -> Optional[Dict[str, Any]]:
-    meta_path = OUTPUT_DIR / f"{job}.json"
-    if not meta_path.exists():
-        return None
-    with open(meta_path, encoding="utf-8") as fh:
-        meta = json.load(fh)
-    meta["source"] = "local"
-    return meta
+def delete_report_file_from_db(semana_id: str, archivo_id: str) -> None:
+    if not init_db():
+        raise RuntimeError(_DB_LAST_ERROR or "No se pudo inicializar PostgreSQL.")
+    execute_db("DELETE FROM reportabilidad_archivos WHERE semana_id = %s AND archivo_id = %s", (semana_id, archivo_id))
+    execute_db("UPDATE reportabilidad_semanas SET updated_at = NOW() WHERE semana_id = %s", (semana_id,))
 
 
 def remove_local_artifacts(job: str) -> None:
-    for path in OUTPUT_DIR.glob(f"*{job}*"):
-        try:
-            path.unlink()
-        except Exception:
-            pass
-    meta_path = OUTPUT_DIR / f"{job}.json"
-    if meta_path.exists():
-        try:
-            meta_path.unlink()
-        except Exception:
-            pass
+    # En Render el disco local es efímero; de todos modos limpiamos cargas temporales
+    # porque la información persistente queda guardada en PostgreSQL.
+    for folder in (OUTPUT_DIR, UPLOAD_DIR):
+        for path in folder.glob(f"*{job}*"):
+            try:
+                path.unlink()
+            except Exception:
+                pass
 
 
+# -----------------------------
+# Rutas Flask
+# -----------------------------
 @app.route("/", methods=["GET"])
 def index():
-    return render_template("index.html", db_status=db_status())
+    semanas = list_weeks() if DATABASE_URL else []
+    return render_template("index.html", db_status=db_status(), semanas=semanas)
 
 
 @app.route("/healthz", methods=["GET"])
@@ -1077,138 +1334,159 @@ def healthz():
 
 @app.route("/historial", methods=["GET"])
 def historial():
-    procesos = list_processings_from_db() if DATABASE_URL else []
-    return render_template("historial.html", procesos=procesos, db_status=db_status())
+    semanas = list_weeks() if DATABASE_URL else []
+    return render_template("historial.html", semanas=semanas, db_status=db_status())
 
 
-@app.route("/procesar", methods=["POST"])
-def procesar():
+@app.route("/crear_semana", methods=["POST"])
+def crear_semana():
+    try:
+        if not DATABASE_URL:
+            flash("Debes configurar DATABASE_URL para guardar semanas acumulativas en PostgreSQL.", "error")
+            return redirect(url_for("index"))
+        curva = request.files.get("curva")
+        reports = [f for f in request.files.getlist("reportabilidad") if f and f.filename]
+        nombre_semana = clean_text(request.form.get("nombre_semana", ""))
+        if not curva or not curva.filename:
+            flash("Debes subir la curva de poblamiento para crear la semana.", "error")
+            return redirect(url_for("index"))
+
+        semana_id = uuid.uuid4().hex[:10]
+        curve_original_name = secure_filename(curva.filename) or curva.filename
+        curve_path = safe_filename("curva", curva.filename, semana_id)
+        curva.save(curve_path)
+        planned_rows, plan_summary = parse_curve_planning(curve_path)
+        if not nombre_semana:
+            nombre_semana = f"{plan_summary.get('plan_scope', 'Semana')} - {curve_original_name}"
+        create_week_in_db(semana_id, nombre_semana, curve_original_name, planned_rows, plan_summary)
+
+        loaded_reports = 0
+        for idx, file_storage in enumerate(reports, start=1):
+            original_name = secure_filename(file_storage.filename) or file_storage.filename
+            report_path = safe_filename("report", file_storage.filename, semana_id, idx)
+            file_storage.save(report_path)
+            rows, stats = parse_reportability_file(report_path)
+            save_reportability_upload(semana_id, original_name, rows, stats)
+            loaded_reports += 1
+
+        remove_local_artifacts(semana_id)
+        if loaded_reports:
+            flash(f"Semana creada y {loaded_reports} reportabilidad(es) agregada(s). Podrás seguir alimentando esta misma semana después.", "ok")
+        else:
+            flash("Semana creada con su curva. Ahora puedes ir cargando reportabilidades día a día.", "ok")
+        return redirect(url_for("ver_semana", semana_id=semana_id))
+    except Exception as exc:
+        app.logger.exception("Error al crear semana")
+        flash(f"Error al crear semana: {exc}", "error")
+        return redirect(url_for("index"))
+
+
+@app.route("/semana/<semana_id>", methods=["GET"])
+def ver_semana(semana_id: str):
+    meta = load_week_state(semana_id, preview_only=True) if DATABASE_URL else None
+    if not meta:
+        flash("No se encontró la semana solicitada.", "error")
+        return redirect(url_for("historial"))
+    return render_template("semana.html", meta=meta, target_columns=TARGET_COLUMNS)
+
+
+@app.route("/semana/<semana_id>/agregar", methods=["POST"])
+def agregar_reportabilidad(semana_id: str):
+    try:
+        reports = [f for f in request.files.getlist("reportabilidad") if f and f.filename]
+        if not reports:
+            flash("Debes seleccionar al menos una reportabilidad para agregar.", "error")
+            return redirect(url_for("ver_semana", semana_id=semana_id))
+        if not get_week_base(semana_id):
+            flash("La semana seleccionada no existe.", "error")
+            return redirect(url_for("historial"))
+        loaded_reports = 0
+        for idx, file_storage in enumerate(reports, start=1):
+            original_name = secure_filename(file_storage.filename) or file_storage.filename
+            report_path = safe_filename("report", file_storage.filename, semana_id, idx)
+            file_storage.save(report_path)
+            rows, stats = parse_reportability_file(report_path)
+            save_reportability_upload(semana_id, original_name, rows, stats)
+            loaded_reports += 1
+        remove_local_artifacts(semana_id)
+        flash(f"Se agregaron {loaded_reports} reportabilidad(es) a la semana. El cruce quedó actualizado automáticamente.", "ok")
+        return redirect(url_for("ver_semana", semana_id=semana_id))
+    except Exception as exc:
+        app.logger.exception("Error al agregar reportabilidad")
+        flash(f"Error al agregar reportabilidad: {exc}", "error")
+        return redirect(url_for("ver_semana", semana_id=semana_id))
+
+
+@app.route("/semana/<semana_id>/reemplazar_curva", methods=["POST"])
+def reemplazar_curva(semana_id: str):
     try:
         curva = request.files.get("curva")
-        reports = request.files.getlist("reportabilidad")
-        descripcion = clean_text(request.form.get("descripcion", ""))
         if not curva or not curva.filename:
-            flash("Debes subir la curva de poblamiento.", "error")
-            return redirect(url_for("index"))
-        reports = [f for f in reports if f and f.filename]
-        if not reports:
-            flash("Debes subir al menos un archivo de reportabilidad/dotación.", "error")
-            return redirect(url_for("index"))
-
-        job = uuid.uuid4().hex[:10]
+            flash("Debes seleccionar una nueva curva.", "error")
+            return redirect(url_for("ver_semana", semana_id=semana_id))
+        if not get_week_base(semana_id):
+            flash("La semana seleccionada no existe.", "error")
+            return redirect(url_for("historial"))
         curve_original_name = secure_filename(curva.filename) or curva.filename
-        report_original_names = [secure_filename(f.filename) or f.filename for f in reports]
-        curve_path = safe_filename("curva", curva.filename, job)
+        curve_path = safe_filename("curva", curva.filename, semana_id)
         curva.save(curve_path)
-
-        report_paths: List[Path] = []
-        for idx, file_storage in enumerate(reports, start=1):
-            path = safe_filename("report", file_storage.filename, job, idx)
-            file_storage.save(path)
-            report_paths.append(path)
-
-        transformed, missing_ids, missing_companies, summary = process_files(curve_path, report_paths)
-        summary["descripcion"] = descripcion
-        summary["curve_filename"] = curve_original_name
-        summary["report_filenames"] = report_original_names
-        summary["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        output_path = OUTPUT_DIR / f"reportabilidad_vca_{job}.xlsx"
-        write_output(output_path, transformed, missing_ids, missing_companies, summary)
-
-        saved_db = False
-        if DATABASE_URL:
-            saved_db = save_processing_to_db(
-                job=job,
-                descripcion=descripcion,
-                curve_filename=curve_original_name,
-                report_filenames=report_original_names,
-                transformed=transformed,
-                missing_ids=missing_ids,
-                missing_companies=missing_companies,
-                summary=summary,
-            )
-
-        meta = {
-            "job": job,
-            "output": output_path.name,
-            "summary": summary,
-            "preview": transformed[:20],
-            "missing_ids": missing_ids[:80],
-            "missing_companies": missing_companies[:80],
-            "created_at": summary["created_at"],
-            "descripcion": descripcion,
-            "curve_filename": curve_original_name,
-            "report_filenames": report_original_names,
-            "source": "db" if saved_db else "local",
-        }
-        with open(OUTPUT_DIR / f"{job}.json", "w", encoding="utf-8") as fh:
-            json.dump(meta, fh, ensure_ascii=False, indent=2)
-
-        if saved_db:
-            flash("Reportabilidad procesada y guardada en PostgreSQL.", "ok")
-        elif DATABASE_URL:
-            flash("Se procesó el archivo, pero no se pudo confirmar guardado en PostgreSQL. Revisa /healthz o los logs.", "error")
-        else:
-            flash("Se procesó el archivo. No hay DATABASE_URL configurada, por lo tanto no quedó guardado en PostgreSQL.", "error")
-        return redirect(url_for("resultado", job=job))
+        planned_rows, plan_summary = parse_curve_planning(curve_path)
+        replace_week_curve(semana_id, curve_original_name, planned_rows, plan_summary)
+        remove_local_artifacts(semana_id)
+        flash("Curva reemplazada correctamente. Las reportabilidades ya cargadas se mantienen y el cruce fue recalculado.", "ok")
+        return redirect(url_for("ver_semana", semana_id=semana_id))
     except Exception as exc:
-        app.logger.exception("Error al procesar archivos")
-        flash(f"Error al procesar archivos: {exc}", "error")
-        return redirect(url_for("index"))
+        app.logger.exception("Error al reemplazar curva")
+        flash(f"Error al reemplazar curva: {exc}", "error")
+        return redirect(url_for("ver_semana", semana_id=semana_id))
 
 
+@app.route("/semana/<semana_id>/eliminar_archivo/<archivo_id>", methods=["POST"])
+def eliminar_archivo(semana_id: str, archivo_id: str):
+    try:
+        delete_report_file_from_db(semana_id, archivo_id)
+        remove_local_artifacts(semana_id)
+        flash("Reportabilidad eliminada de esta semana. El cruce quedó actualizado con los archivos restantes.", "ok")
+    except Exception as exc:
+        app.logger.exception("Error al eliminar archivo")
+        flash(f"Error al eliminar reportabilidad: {exc}", "error")
+    return redirect(url_for("ver_semana", semana_id=semana_id))
+
+
+@app.route("/descargar/<semana_id>")
+def descargar(semana_id: str):
+    meta = load_week_state(semana_id, preview_only=False) if DATABASE_URL else None
+    if not meta:
+        flash("No se encontró la semana solicitada.", "error")
+        return redirect(url_for("historial"))
+    output_path = OUTPUT_DIR / f"reportabilidad_vca_{semana_id}.xlsx"
+    summary = dict(meta["summary"])
+    summary["archivos_reportabilidad"] = ", ".join([a["filename"] for a in meta.get("archivos", [])])
+    write_output(output_path, meta["transformed_all"], meta["missing_ids"], meta["missing_companies"], summary)
+    return send_file(output_path, as_attachment=True, download_name=f"Reportabilidad_VCA_{meta['nombre_semana']}.xlsx")
+
+
+@app.route("/semana/<semana_id>/eliminar", methods=["POST"])
+def eliminar_semana(semana_id: str):
+    try:
+        delete_week_from_db(semana_id)
+        remove_local_artifacts(semana_id)
+        flash("Semana eliminada correctamente, incluyendo curva, reportabilidades y datos transformados asociados.", "ok")
+    except Exception as exc:
+        app.logger.exception("Error al eliminar semana")
+        flash(f"Error al eliminar semana: {exc}", "error")
+    return redirect(url_for("historial"))
+
+
+# Compatibilidad con enlaces de versiones anteriores
 @app.route("/resultado/<job>")
 def resultado(job: str):
-    meta = load_processing_from_db(job, preview_only=True) if DATABASE_URL else None
-    if not meta:
-        meta = load_meta_fallback(job)
-    if not meta:
-        flash("No se encontró el procesamiento solicitado.", "error")
-        return redirect(url_for("index"))
-    return render_template("resultado.html", meta=meta, target_columns=TARGET_COLUMNS)
-
-
-@app.route("/descargar/<job>")
-def descargar(job: str):
-    db_meta = load_processing_from_db(job, preview_only=False) if DATABASE_URL else None
-    if db_meta:
-        output_path = OUTPUT_DIR / f"reportabilidad_vca_{job}_db.xlsx"
-        write_output(
-            output_path,
-            db_meta["transformed_all"],
-            db_meta["missing_ids"],
-            db_meta["missing_companies"],
-            db_meta["summary"],
-        )
-        return send_file(output_path, as_attachment=True, download_name="Reportabilidad_VCA_Formato_Final.xlsx")
-
-    meta = load_meta_fallback(job)
-    if not meta:
-        flash("No se encontró el archivo de salida.", "error")
-        return redirect(url_for("index"))
-    path = OUTPUT_DIR / meta["output"]
-    if not path.exists():
-        flash("El archivo local ya no está disponible. Si usas Render, guarda en PostgreSQL para regenerarlo.", "error")
-        return redirect(url_for("resultado", job=job))
-    return send_file(path, as_attachment=True, download_name="Reportabilidad_VCA_Formato_Final.xlsx")
+    return redirect(url_for("ver_semana", semana_id=job))
 
 
 @app.route("/eliminar/<job>", methods=["POST"])
 def eliminar(job: str):
-    try:
-        deleted = False
-        if DATABASE_URL:
-            deleted = delete_processing_from_db(job)
-        remove_local_artifacts(job)
-        if deleted:
-            flash("Reportabilidad eliminada correctamente de PostgreSQL.", "ok")
-        else:
-            flash("Se eliminaron los archivos locales asociados. No se confirmó eliminación en PostgreSQL.", "ok")
-    except Exception as exc:
-        app.logger.exception("Error al eliminar reportabilidad")
-        flash(f"Error al eliminar reportabilidad: {exc}", "error")
-    return redirect(url_for("historial"))
+    return redirect(url_for("eliminar_semana", semana_id=job), code=307)
 
 
 if __name__ == "__main__":

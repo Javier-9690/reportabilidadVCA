@@ -2,33 +2,33 @@
 {% block content %}
 <section class="hero-card">
   <div>
-    <div class="eyebrow">Reporte operativo</div>
-    <h2>Importar curva y reportabilidad</h2>
-    <p>El sistema cruza la curva de poblamiento contra la dotación enviada por empresa, guarda el proceso en PostgreSQL y genera el Excel final normalizado.</p>
+    <div class="eyebrow">Control semanal acumulativo</div>
+    <h2>Crear semana y alimentar reportabilidades por etapas</h2>
+    <p>Primero guarda la curva de la semana. Después puedes ir agregando reportabilidades de empresas durante varios días sin perder lo cargado.</p>
   </div>
   <div class="actions compact">
-    <a class="btn secondary" href="{{ url_for('historial') }}">Ver historial</a>
+    <a class="btn secondary" href="{{ url_for('historial') }}">Ver semanas</a>
   </div>
 </section>
 
 <section class="card full">
-  <h2>Estado de almacenamiento</h2>
+  <h2>Estado de PostgreSQL</h2>
   {% if db_status.enabled and db_status.initialized %}
-    <div class="notice ok">PostgreSQL conectado. Las reportabilidades procesadas quedarán guardadas en la base de datos.</div>
+    <div class="notice ok">PostgreSQL conectado. Cada semana, curva y reportabilidad quedará guardada de forma persistente.</div>
   {% elif db_status.enabled %}
-    <div class="notice error">DATABASE_URL está configurada, pero la app todavía no pudo inicializar PostgreSQL. Revisa los logs o entra a /healthz.</div>
+    <div class="notice error">DATABASE_URL está configurada, pero PostgreSQL aún no inicializó. Revisa /healthz o los logs de Render.</div>
   {% else %}
-    <div class="notice error">No hay DATABASE_URL configurada. La app procesará archivos, pero no guardará historial persistente.</div>
+    <div class="notice error">No hay DATABASE_URL configurada. Para usar semanas acumulativas necesitas conectar PostgreSQL.</div>
   {% endif %}
 </section>
 
 <section class="card full">
-  <h2>Procesar y guardar nueva reportabilidad</h2>
-  <form action="{{ url_for('procesar') }}" method="post" enctype="multipart/form-data">
+  <h2>Crear nueva semana</h2>
+  <form action="{{ url_for('crear_semana') }}" method="post" enctype="multipart/form-data">
     <div class="uploadbox">
-      <label>Nombre o referencia de la carga</label>
-      <input type="text" name="descripcion" placeholder="Ej: Semana 26 - reporte contratistas VCA">
-      <small>Este texto queda guardado en el historial para identificar la semana o actualización.</small>
+      <label>Nombre de la semana</label>
+      <input type="text" name="nombre_semana" placeholder="Ej: Semana 26 - 22 al 28 junio VCA">
+      <small>Este nombre permite encontrar la semana en el historial y seguir cargando reportabilidades después.</small>
     </div>
     <div class="uploadbox">
       <label>Curva de poblamiento (.xlsx / .xlsm)</label>
@@ -36,24 +36,54 @@
       <small>Hoja esperada: <b>Fcst_Autorizado VCA</b>. ID base: <b>ID de la solicitud</b>.</small>
     </div>
     <div class="uploadbox">
-      <label>Reportabilidad / dotación de empresa (.xlsx / .xlsm)</label>
-      <input type="file" name="reportabilidad" accept=".xlsx,.xlsm" multiple required>
-      <small>Permite una o varias empresas. ID esperado: <b>N° DE ID</b>.</small>
+      <label>Reportabilidades iniciales de empresa, opcional</label>
+      <input type="file" name="reportabilidad" accept=".xlsx,.xlsm" multiple>
+      <small>También puedes crear la semana solo con la curva y cargar reportabilidades más adelante.</small>
     </div>
     <div class="actions right">
-      <button class="btn primary" type="submit">Procesar y guardar</button>
+      <button class="btn primary" type="submit">Crear semana</button>
     </div>
   </form>
 </section>
 
-<section class="grid">
-  <div class="card">
-    <h2>Actualización semanal</h2>
-    <p>Cada carga queda registrada como un proceso independiente. Puedes guardar Semana 26, Semana 27, Semana 28, etc., y eliminar cargas antiguas cuando ya no correspondan.</p>
-  </div>
-  <div class="card">
-    <h2>Exportación recuperable</h2>
-    <p>El Excel se puede volver a descargar desde el historial porque los datos transformados, faltantes y empresas sin reportabilidad quedan guardados en PostgreSQL.</p>
-  </div>
+<section class="card full">
+  <h2>Semanas recientes</h2>
+  {% if semanas %}
+    <div class="tablewrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Semana</th>
+            <th>Actualizada</th>
+            <th>Curva</th>
+            <th>Reportabilidades</th>
+            <th>IDs curva</th>
+            <th>IDs reportados</th>
+            <th>Empresas sin reporte</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in semanas[:8] %}
+          <tr>
+            <td><b>{{ s.nombre_semana }}</b></td>
+            <td>{{ s.updated_at }}</td>
+            <td>{{ s.curve_filename }}</td>
+            <td>{{ s.summary.report_files }}</td>
+            <td>{{ s.summary.planned_ids }}</td>
+            <td>{{ s.summary.reported_ids }}</td>
+            <td>{{ s.summary.missing_companies }}</td>
+            <td class="row-actions">
+              <a class="btn tiny secondary" href="{{ url_for('ver_semana', semana_id=s.semana_id) }}">Abrir</a>
+              <a class="btn tiny success" href="{{ url_for('descargar', semana_id=s.semana_id) }}">Excel</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="notice ok">Aún no hay semanas guardadas.</div>
+  {% endif %}
 </section>
 {% endblock %}
