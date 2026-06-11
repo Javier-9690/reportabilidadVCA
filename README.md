@@ -1,22 +1,26 @@
 # Reportabilidad VCA 5400
 
-Aplicación web Flask lista para Render.com. Permite subir una curva de poblamiento y una o varias planillas de reportabilidad/dotación, cruza los ID planificados contra los ID reportados y genera un Excel de salida con formato estándar.
+Aplicación Flask para Render.com que cruza la curva de poblamiento con la reportabilidad/dotación de empresas.
 
 ## Funciones
 
-- Lee automáticamente la hoja `Fcst_Autorizado VCA` de la curva.
-- Detecta `ID de la solicitud`, empresa, número de contrato y columnas de dotación diaria.
-- Lee reportabilidad de empresa desde `Hoja1` o la primera hoja compatible.
-- Reconoce el ID de reportabilidad desde `N° DE ID` o nombres equivalentes.
-- Informa empresas con dotación planificada que no aparecen en la reportabilidad cargada.
-- Informa IDs planificados no reportados.
-- Exporta un Excel con estas hojas:
+- Carga curva de poblamiento Excel.
+- Lee automáticamente la hoja `Fcst_Autorizado VCA`.
+- Detecta la semana de planificación desde el archivo o encabezado (`Semana 26`, `W26`, etc.).
+- Carga una o varias planillas de reportabilidad/dotación.
+- Cruza por ID:
+  - Curva: `ID de la solicitud`.
+  - Reportabilidad: `N° DE ID` o equivalente.
+- Informa empresas con dotación planificada que no enviaron reportabilidad.
+- Exporta Excel final con:
   - `Formato_Final`
   - `Empresas_Sin_Reportabilidad`
   - `IDs_Planificados_No_Reportados`
   - `Resumen`
 
-## Columnas del formato final
+## Excel final
+
+Columnas generadas en `Formato_Final`:
 
 1. ID
 2. MODULO
@@ -30,35 +34,30 @@ Aplicación web Flask lista para Render.com. Permite subir una curva de poblamie
 10. GENERO
 11. NOMBRE DE TURNO
 
-## Ejecución local
+## Render.com
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python app.py
+### Environment Variable obligatoria
+
+Agrega en Render:
+
+```text
+PYTHON_VERSION=3.11.11
 ```
 
-Luego abre `http://127.0.0.1:5000`.
+### Build Command
 
-## Deploy en Render.com
+```bash
+pip install --upgrade pip && pip install --only-binary=:all: -r requirements.txt
+```
 
-1. Sube esta carpeta a un repositorio GitHub.
-2. En Render, crea un **Web Service**.
-3. Conecta el repositorio.
-4. Verifica que los archivos estén en la raíz del repositorio: `app.py`, `requirements.txt`, `.python-version`, `render.yaml`, `templates/` y `static/`.
-5. Usa estos comandos:
-   - Build Command: `pip install --upgrade pip && pip install -r requirements.txt`
-   - Start Command: `gunicorn app:app`
-6. Configura la variable de entorno `PYTHON_VERSION=3.11.11` si Render no toma automáticamente el archivo `.python-version`.
+### Start Command
 
-## Nota operativa
+```bash
+gunicorn --workers 1 --threads 2 --timeout 180 app:app
+```
 
-Render usa almacenamiento efímero en su plan estándar. Los archivos generados quedan disponibles para descarga inmediatamente después del procesamiento, pero no debe asumirse conservación permanente.
+## Nota técnica
 
+Esta versión no usa `pandas` ni `numpy`. El procesamiento se realiza con `openpyxl` para evitar problemas de compilación y consumo de memoria en Render.
 
-## Corrección de despliegue en Render
-
-Este paquete incluye `.python-version` con `3.11.11` y `render.yaml` con `PYTHON_VERSION=3.11.11`. Esto evita que Render use Python 3.14 por defecto y compile pandas desde fuente.
-
-Si el despliegue anterior falló con `metadata-generation-failed` en pandas, vuelve a subir este paquete, asegúrate de que `.python-version` esté en la raíz del repositorio y ejecuta un nuevo deploy manual.
+Si Render sigue mostrando rutas con `python3.14` en el log, significa que el servicio no tomó la variable `PYTHON_VERSION` o está desplegando otra raíz de proyecto.

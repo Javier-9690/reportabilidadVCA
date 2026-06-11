@@ -2,12 +2,13 @@
 {% block content %}
 <section class="card full">
   <h2>Resultado del procesamiento</h2>
-  <p class="small">Procesado: {{ meta.created_at }} · Hoja de curva usada: <b>{{ meta.summary.curve_sheet }}</b></p>
+  <p class="small">Procesado: {{ meta.created_at }} · Hoja de curva usada: <b>{{ meta.summary.curve_sheet }}</b> · Alcance de planificación: <b>{{ meta.summary.plan_scope }}</b></p>
   <div class="kpis">
     <div class="kpi"><span>IDs planificados</span><strong>{{ meta.summary.planned_ids }}</strong></div>
     <div class="kpi"><span>IDs reportados</span><strong>{{ meta.summary.reported_ids }}</strong></div>
     <div class="kpi"><span>IDs con match</span><strong>{{ meta.summary.matched_ids }}</strong></div>
     <div class="kpi"><span>Empresas sin reporte</span><strong>{{ meta.summary.missing_companies }}</strong></div>
+    <div class="kpi"><span>Filas transformadas</span><strong>{{ meta.summary.transformed_rows }}</strong></div>
   </div>
   <div class="actions">
     <a class="btn success" href="{{ url_for('descargar', job=meta.job) }}">Descargar Excel final</a>
