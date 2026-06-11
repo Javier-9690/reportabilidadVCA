@@ -2,54 +2,45 @@
 {% block content %}
 <section class="hero-card">
   <div>
-    <div class="eyebrow">⌘ Reporte operativo</div>
-    <h1>Reporte alojamiento F&amp;A</h1>
-    <p>Fast &amp; Agile / F&amp;A: cruce entre curva de poblamiento y reportabilidad de dotación por empresa.</p>
-  </div>
-  <div class="hero-actions">
-    <a class="btn green" href="#procesar">↥ Importar archivos</a>
+    <div class="eyebrow">Reporte operativo</div>
+    <h2>Importar curva y reportabilidad</h2>
+    <p>El sistema cruza la curva de poblamiento contra la dotación enviada por empresa y genera el Excel final normalizado.</p>
   </div>
 </section>
 
-<section class="filter-card" id="procesar">
-  <form action="{{ url_for('procesar') }}" method="post" enctype="multipart/form-data" class="upload-form">
-    <div class="field two-thirds">
-      <label>Curva</label>
-      <input type="file" name="curva" accept=".xlsx,.xlsm,.xls" required>
+<section class="card full">
+  <h2>Procesar archivos</h2>
+  <form action="{{ url_for('procesar') }}" method="post" enctype="multipart/form-data">
+    <div class="uploadbox">
+      <label>Curva de poblamiento (.xlsx / .xlsm)</label>
+      <input type="file" name="curva" accept=".xlsx,.xlsm" required>
       <small>Hoja esperada: <b>Fcst_Autorizado VCA</b>. ID base: <b>ID de la solicitud</b>.</small>
     </div>
-    <div class="field two-thirds">
-      <label>Dotación / reportabilidad</label>
-      <input type="file" name="reportabilidad" accept=".xlsx,.xlsm,.xls" multiple required>
+    <div class="uploadbox">
+      <label>Reportabilidad / dotación de empresa (.xlsx / .xlsm)</label>
+      <input type="file" name="reportabilidad" accept=".xlsx,.xlsm" multiple required>
       <small>Permite una o varias empresas. ID esperado: <b>N° DE ID</b>.</small>
     </div>
-    <div class="field action-field">
-      <label>&nbsp;</label>
-      <button class="btn red fullwidth" type="submit">↻ Generar</button>
+    <div class="actions right">
+      <button class="btn primary" type="submit">Generar reporte</button>
     </div>
   </form>
 </section>
 
-<section class="metric-grid">
-  <div class="metric-card"><span>↬ Proceso</span><strong>Curva</strong><small>Fcst_Autorizado VCA</small></div>
-  <div class="metric-card"><span>▣ Cruce</span><strong>ID</strong><small>ID solicitud / N° de ID</small></div>
-  <div class="metric-card"><span>☑ Salida</span><strong>Excel</strong><small>Formato final estándar</small></div>
-  <div class="metric-card"><span>⚠ Control</span><strong>Sin reporte</strong><small>Empresas planificadas no enviadas</small></div>
+<section class="grid">
+  <div class="card">
+    <h2>Control de reportabilidad</h2>
+    <p>Identifica las empresas que tienen dotación planificada en la curva, pero que no aparecen dentro de los archivos cargados como reportabilidad.</p>
+  </div>
+  <div class="card">
+    <h2>Exportación Excel</h2>
+    <p>El archivo final mantiene el formato requerido con ID, módulo, RUT, nombre completo, empresa, contrato, gerencia, turno, CO MEL, género y nombre de turno.</p>
+  </div>
 </section>
 
-<section class="content-card conclusion-card">
-  <h2>💡 Conclusiones del procesamiento</h2>
-  <ul>
-    <li>El sistema toma la curva de poblamiento y detecta los IDs con dotación planificada.</li>
-    <li>Luego compara esos IDs contra las planillas de reportabilidad cargadas por empresa.</li>
-    <li>Finalmente entrega el listado de empresas que tienen dotación planificada en curva, pero no aparecen en la reportabilidad.</li>
-  </ul>
-</section>
-
-<section class="content-card">
-  <div class="section-title">▤ Formato Excel final</div>
-  <p class="subtitle">Columnas normalizadas que genera el sistema.</p>
-  <div class="tablewrap compact-table">
+<section class="card full">
+  <h2>Columnas del Excel final</h2>
+  <div class="tablewrap">
     <table>
       <thead><tr><th>Orden</th><th>Columna</th><th>Origen detectado</th></tr></thead>
       <tbody>
@@ -58,7 +49,7 @@
         <tr><td>3</td><td>RUT (CON GUION)</td><td>RUT normalizado con guion</td></tr>
         <tr><td>4</td><td>NOMBRE COMPLETO</td><td>Nombre huésped / nombre completo</td></tr>
         <tr><td>5</td><td>EMPRESA</td><td>Empresa reportada o empresa de curva</td></tr>
-        <tr><td>6</td><td>NUMERO DE CONTRATO</td><td>N° de contrato / Número Contrato</td></tr>
+        <tr><td>6</td><td>NUMERO DE CONTRATO</td><td>N° de contrato / número contrato</td></tr>
         <tr><td>7</td><td>GERENCIA</td><td>Gerencia</td></tr>
         <tr><td>8</td><td>SISTEMA DE TURNO</td><td>Sistema de turno</td></tr>
         <tr><td>9</td><td>CO MEL</td><td>Contract Owner MEL</td></tr>

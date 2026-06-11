@@ -3,47 +3,35 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Reportabilidad 5400{% endblock %}</title>
+  <title>{% block title %}Reportabilidad VCA 5400{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-  <header class="brandbar">
-    <div class="brand-left" aria-label="Aramark">
-      <span class="aramark-word">aramark</span><span class="aramark-star">✦</span>
+  <header class="topbar">
+    <div class="brand-shell">
+      <div class="logo-wrap left-logo">
+        <img src="{{ url_for('static', filename='img/aramark_logo.png') }}" alt="Aramark">
+      </div>
+      <div class="brand-title">
+        <h1>Reportabilidad 5400</h1>
+        <p>Curva de poblamiento · Dotación por empresa · Cruce por ID</p>
+      </div>
+      <div class="logo-wrap right-logo">
+        <img src="{{ url_for('static', filename='img/escondida_bhp_logo.png') }}" alt="Escondida BHP">
+      </div>
     </div>
-
-    <div class="brand-center">
-      <div class="app-title">▣ Reportabilidad 5400</div>
-      <nav class="topnav" aria-label="Navegación principal">
-        <a class="navitem active" href="{{ url_for('index') }}">◉ Dashboard</a>
-        <a class="navitem" href="{{ url_for('index') }}">↥ Importar</a>
-        <a class="navitem disabled" href="#">▣ Censos</a>
-        <a class="navitem disabled" href="#">✣ Sin match</a>
-        <a class="navitem disabled" href="#">⌁ Curva</a>
-        <a class="navitem disabled" href="#">⊕ Nuevo ID</a>
-        <a class="navitem disabled" href="#">▦ Dotación</a>
-        <a class="navitem disabled" href="#">▥ Ocupabilidad</a>
-        <a class="navitem disabled" href="#">▤ EGP</a>
-        <a class="navitem disabled" href="#">▭ F&amp;A</a>
-      </nav>
-    </div>
-
-    <div class="brand-right" aria-label="Escondida BHP">ESCONDIDA <span>|</span> BHP</div>
   </header>
 
-  <main class="page">
+  <main class="container">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
-        <section class="flash-stack">
-          {% for category, message in messages %}
-            <div class="notice {{ 'error' if category == 'error' else 'ok' }}">{{ message }}</div>
-          {% endfor %}
-        </section>
+        {% for category, message in messages %}
+          <div class="notice {{ 'error' if category == 'error' else 'ok' }}">{{ message }}</div>
+        {% endfor %}
       {% endif %}
     {% endwith %}
     {% block content %}{% endblock %}
+    <div class="footer">Diseñado por Javier Rivera · Campamento 5400</div>
   </main>
-
-  <footer class="footer">Diseñado por Javier Rivera · Campamento 5400 · Aramark / Escondida BHP</footer>
 </body>
 </html>
